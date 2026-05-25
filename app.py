@@ -2,12 +2,19 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import secrets
+import base64
+import mimetypes
+import shutil
 from datetime import datetime
+from pathlib import Path
 
 # Configuración de página
 st.set_page_config(page_title="Complejo Recreativo Las Marías", layout="wide", page_icon="🏊‍♂️")
 
 DB_NAME = "complejo.db"
+BASE_DIR = Path(__file__).resolve().parent
+ASSETS_DIR = BASE_DIR / "assets"
+BACKUP_DIR = BASE_DIR / "backups"
 
 # --- MIGRACIÓN AUTOMÁTICA E INICIALIZACIÓN DE LA BASE DE DATOS ---
 def asegurar_estructura_db():
@@ -20,6 +27,7 @@ def asegurar_estructura_db():
     cursor.execute('''CREATE TABLE IF NOT EXISTS cocina (id INTEGER PRIMARY KEY AUTOINCREMENT, cliente TEXT, plato TEXT, cantidad INTEGER, fecha_hora TEXT, estado TEXT)''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS tarifas (categoria TEXT PRIMARY KEY, precio REAL)''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS tarifas_cancha (tipo TEXT PRIMARY KEY, precio REAL)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS configuracion (clave TEXT PRIMARY KEY, valor TEXT)''')
     
     # Tabla piscina con estado_caja para permitir el reinicio correcto en los cierres
     cursor.execute('''
@@ -102,6 +110,11 @@ def asegurar_estructura_db():
         try: cursor.execute("ALTER TABLE usuarios ADD COLUMN login_token TEXT")
         except: pass
 
+    cursor.execute("PRAGMA table_info(cocina)")
+    if "fecha_entrega" not in [col[1] for col in cursor.fetchall()]:
+        try: cursor.execute("ALTER TABLE cocina ADD COLUMN fecha_entrega TEXT")
+        except: pass
+
     # Registros iniciales por defecto
     cursor.execute("INSERT OR IGNORE INTO usuarios (username, password, rol) VALUES ('administrador', 'admin123', 'Administrador')")
     cursor.execute("INSERT OR IGNORE INTO usuarios (username, password, rol) VALUES ('cocinero', 'cocina123', 'Cocinero')")
@@ -127,6 +140,55 @@ def ejecutar_query(query, params=(), fetch=False, commit=False):
         conn.commit()
     conn.close()
     return res
+
+def formatear_montos_df(df, columnas):
+    df_formateado = df.copy()
+    for columna in columnas:
+        if columna in df_formateado.columns:
+            df_formateado[columna] = pd.to_numeric(df_formateado[columna], errors="coerce").fillna(0).map(lambda valor: f"{valor:.2f}")
+    return df_formateado
+
+# --- SERVICIOS DE CONFIGURACION, MARCA Y RESPALDOS ---
+def preparar_directorios_sistema():
+    ASSETS_DIR.mkdir(exist_ok=True)
+    BACKUP_DIR.mkdir(exist_ok=True)
+
+def obtener_config(clave, valor_defecto=""):
+    fila = ejecutar_query("SELECT valor FROM configuracion WHERE clave=?", (clave,), fetch=True)
+    return fila[0][0] if fila else valor_defecto
+
+def guardar_config(clave, valor):
+    ejecutar_query(
+        "INSERT OR REPLACE INTO configuracion (clave, valor) VALUES (?, ?)",
+        (clave, valor),
+        commit=True
+    )
+
+def guardar_archivo_subido(archivo, nombre_base):
+    preparar_directorios_sistema()
+    extension = Path(archivo.name).suffix.lower() or ".png"
+    destino = ASSETS_DIR / f"{nombre_base}{extension}"
+    with destino.open("wb") as salida:
+        salida.write(archivo.getbuffer())
+    return str(destino)
+
+def imagen_css_desde_archivo(ruta, fallback_url):
+    ruta_archivo = Path(ruta) if ruta else None
+    if ruta_archivo and ruta_archivo.exists():
+        mime = mimetypes.guess_type(ruta_archivo.name)[0] or "image/png"
+        data = base64.b64encode(ruta_archivo.read_bytes()).decode("utf-8")
+        return f'url("data:{mime};base64,{data}")'
+    return f'url("{fallback_url}")'
+
+def crear_backup_base_datos():
+    preparar_directorios_sistema()
+    origen = BASE_DIR / DB_NAME
+    marca_tiempo = datetime.now().strftime("%Y%m%d_%H%M%S")
+    destino = BACKUP_DIR / f"backup_complejo_{marca_tiempo}.db"
+    shutil.copy2(origen, destino)
+    return destino
+
+preparar_directorios_sistema()
 
 # --- INICIALIZAR CARRITO TEMPORAL ---
 if 'carrito' not in st.session_state:
@@ -265,15 +327,41 @@ def guardar_pestana_admin():
     if pestana:
         st.query_params["tab"] = pestana
 
+def cambiar_modulo_admin():
+    modulo = st.session_state.get("modulo_admin_selector")
+    if modulo:
+        st.session_state["modulo_admin_activo"] = modulo
+        st.query_params["tab"] = modulo
+
+def resolver_modulo_admin(opciones_menu):
+    modulo_guardado = st.session_state.get("modulo_admin_activo")
+    modulo_url = obtener_parametro_url("tab")
+
+    if modulo_guardado in opciones_menu:
+        modulo_activo = modulo_guardado
+    elif modulo_url in opciones_menu:
+        modulo_activo = modulo_url
+    else:
+        modulo_activo = opciones_menu[0]
+
+    st.session_state["modulo_admin_activo"] = modulo_activo
+    st.session_state["modulo_admin_selector"] = modulo_activo
+    st.query_params["tab"] = modulo_activo
+    return modulo_activo
+
 restaurar_sesion_desde_url()
 
 def aplicar_estilos_login():
+    fondo_login = imagen_css_desde_archivo(
+        obtener_config("login_background_path"),
+        "https://images.unsplash.com/photo-1575429198097-0414ec08e8cd?auto=format&fit=crop&w=1800&q=80"
+    )
     st.markdown("""
     <style>
         [data-testid="stAppViewContainer"] {
             background:
                 linear-gradient(120deg, rgba(4, 47, 68, 0.78), rgba(8, 121, 150, 0.42)),
-                url("https://images.unsplash.com/photo-1575429198097-0414ec08e8cd?auto=format&fit=crop&w=1800&q=80");
+                __LOGIN_BACKGROUND__;
             background-size: cover;
             background-position: center;
             background-attachment: fixed;
@@ -364,44 +452,40 @@ def aplicar_estilos_login():
             color: white;
         }
     </style>
-    """, unsafe_allow_html=True)
+    """.replace("__LOGIN_BACKGROUND__", fondo_login), unsafe_allow_html=True)
 
 def aplicar_estilos_sistema():
     st.markdown("""
     <style>
         :root {
-            --lm-primary: #006d77;
-            --lm-primary-dark: #073b4c;
-            --lm-accent: #0ea5a4;
-            --lm-bg: #f4f8fb;
+            --lm-primary: #0f9ca7;
+            --lm-primary-dark: #1f2933;
+            --lm-accent: #16b8c4;
+            --lm-bg: #dfe7f1;
             --lm-panel: #ffffff;
-            --lm-border: #d8e6ea;
+            --lm-border: #cdd8e3;
             --lm-text: #17333b;
             --lm-muted: #5f7780;
         }
 
         [data-testid="stAppViewContainer"] {
-            background:
-                radial-gradient(circle at top left, rgba(14, 165, 164, 0.14), transparent 32%),
-                linear-gradient(180deg, #f6fbfd 0%, var(--lm-bg) 100%);
+            background: var(--lm-bg);
             color: var(--lm-text);
         }
 
         [data-testid="stHeader"] {
-            background: rgba(246, 251, 253, 0.86);
-            backdrop-filter: blur(10px);
-            border-bottom: 1px solid rgba(216, 230, 234, 0.8);
+            display: none;
         }
 
         .block-container {
-            padding-top: 2rem;
+            padding-top: 1rem;
             padding-bottom: 3rem;
             max-width: 1500px;
         }
 
         [data-testid="stSidebar"] {
-            background: linear-gradient(180deg, #073b4c 0%, #006d77 100%);
-            border-right: 1px solid rgba(255, 255, 255, 0.16);
+            background: #222b35;
+            border-right: 1px solid rgba(255, 255, 255, 0.08);
         }
 
         [data-testid="stSidebar"] * {
@@ -411,15 +495,20 @@ def aplicar_estilos_sistema():
         [data-testid="stSidebar"] [data-testid="stImage"] {
             display: flex;
             justify-content: center;
+            align-items: center;
             margin-top: 14px;
-            margin-bottom: 8px;
+            margin-bottom: 10px;
+            width: 100%;
         }
 
         [data-testid="stSidebar"] img {
-            padding: 10px;
+            display: block;
+            margin-left: auto;
+            margin-right: auto;
+            padding: 8px;
             border-radius: 8px;
-            background: rgba(255, 255, 255, 0.16);
-            box-shadow: 0 10px 26px rgba(0, 0, 0, 0.22);
+            background: rgba(255, 255, 255, 0.10);
+            box-shadow: 0 10px 24px rgba(0, 0, 0, 0.24);
         }
 
         [data-testid="stSidebar"] h1 {
@@ -430,9 +519,101 @@ def aplicar_estilos_sistema():
         }
 
         [data-testid="stSidebar"] [data-testid="stAlert"] {
-            background: rgba(255, 255, 255, 0.14);
-            border: 1px solid rgba(255, 255, 255, 0.2);
+            background: rgba(255, 255, 255, 0.10);
+            border: 1px solid rgba(255, 255, 255, 0.14);
             border-radius: 8px;
+        }
+
+        [data-testid="stSidebar"] div[role="radiogroup"] {
+            gap: 3px;
+            background: transparent;
+            border: 0;
+        }
+
+        [data-testid="stSidebar"] label[data-baseweb="radio"] {
+            min-height: 38px;
+            margin: 0;
+            padding: 8px 10px;
+            border-radius: 4px;
+            color: #d7e0e8 !important;
+            transition: background 0.15s ease;
+        }
+
+        [data-testid="stSidebar"] label[data-baseweb="radio"]:hover {
+            background: rgba(22, 184, 196, 0.18);
+        }
+
+        [data-testid="stSidebar"] label[data-baseweb="radio"] > div:first-child {
+            display: none;
+        }
+
+        .st-key-payment_destination_card {
+            padding: 14px;
+            border: 1px solid var(--lm-border);
+            border-radius: 8px;
+            background: #ffffff;
+            box-shadow: 0 10px 24px rgba(31, 41, 51, 0.07);
+        }
+
+        .st-key-payment_destination_card div[role="radiogroup"] {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px;
+            border: 0;
+            background: transparent;
+        }
+
+        .st-key-payment_destination_card label[data-baseweb="radio"] {
+            min-height: 58px;
+            margin: 0;
+            padding: 13px 14px;
+            border: 1px solid #cdd8e3;
+            border-radius: 8px;
+            background: #f8fbfd;
+            box-shadow: 0 4px 12px rgba(31, 41, 51, 0.04);
+            transition: all 0.16s ease;
+        }
+
+        .st-key-payment_destination_card label[data-baseweb="radio"]:hover {
+            border-color: var(--lm-primary);
+            background: #eefbfc;
+            transform: translateY(-1px);
+            box-shadow: 0 10px 20px rgba(15, 156, 167, 0.12);
+        }
+
+        .st-key-payment_destination_card label[data-baseweb="radio"] p {
+            color: var(--lm-primary-dark) !important;
+            font-weight: 850 !important;
+            font-size: 13px !important;
+            line-height: 1.25;
+        }
+
+        .st-key-payment_destination_card label[data-baseweb="radio"] > div:first-child {
+            margin-right: 8px;
+        }
+
+        .module-subtitle {
+            margin: -4px 0 22px 0;
+            padding: 13px 16px;
+            border: 1px solid var(--lm-border);
+            border-left: 5px solid var(--lm-primary);
+            border-radius: 8px;
+            background: #ffffff;
+            box-shadow: 0 8px 20px rgba(31, 41, 51, 0.06);
+        }
+
+        .module-subtitle strong {
+            display: block;
+            color: var(--lm-primary-dark);
+            font-size: 20px;
+            font-weight: 850;
+            text-align: left;
+        }
+
+        @media (max-width: 900px) {
+            .st-key-payment_destination_card div[role="radiogroup"] {
+                grid-template-columns: 1fr;
+            }
         }
 
         h1, h2, h3 {
@@ -448,15 +629,6 @@ def aplicar_estilos_sistema():
 
         h2, h3 {
             font-weight: 800;
-        }
-
-        div[data-testid="stTabs"] > div[role="tablist"] {
-            gap: 8px;
-            padding: 8px;
-            border: 1px solid var(--lm-border);
-            border-radius: 8px;
-            background: rgba(255, 255, 255, 0.82);
-            box-shadow: 0 10px 28px rgba(7, 59, 76, 0.07);
         }
 
         div[data-testid="stTabs"] button[role="tab"] {
@@ -626,26 +798,57 @@ if not st.session_state['autenticado']:
     login()
 else:
     aplicar_estilos_sistema()
-    st.sidebar.image("https://cdn-icons-png.flaticon.com/512/456/456212.png", width=80)
+    logo_sistema = obtener_config("logo_path")
+    if logo_sistema and Path(logo_sistema).exists():
+        st.sidebar.image(logo_sistema, width=92)
+    else:
+        st.sidebar.image("https://cdn-icons-png.flaticon.com/512/456/456212.png", width=80)
     st.sidebar.title(f"Hola, {st.session_state['usuario']}")
     st.sidebar.info(f"Rol: {st.session_state['rol']}")
-    if st.sidebar.button("Cerrar Sesión", type="secondary"):
-        logout()
-
     if st.session_state['rol'] == "Administrador":
+        opciones_menu = [
+            "🛒 Ventas y Cocina",
+            "📦 Control de Stock",
+            "🏊‍♂️ Control de piscina",
+            "⚽ Control de Cancha",
+            "💰 Caja y Reportes",
+            "⚙️ Configuración"
+        ]
+        titulos_modulos = {
+            opciones_menu[0]: "Generar Nueva Venta / Crédito",
+            opciones_menu[1]: "Control e Ingreso de Mercadería",
+            opciones_menu[2]: "Ingreso y Control de la Piscina",
+            opciones_menu[3]: "Reservas de Cancha",
+            opciones_menu[4]: "Control de Finanzas y Cierre de Caja Diaria",
+            opciones_menu[5]: "Configuración del Sistema"
+        }
+        modulo_actual = resolver_modulo_admin(opciones_menu)
+        st.sidebar.markdown("### Menú Principal")
+        st.sidebar.radio(
+            "Módulos",
+            opciones_menu,
+            label_visibility="collapsed",
+            key="modulo_admin_selector",
+            on_change=cambiar_modulo_admin
+        )
+        modulo_actual = st.session_state["modulo_admin_activo"]
+        if st.sidebar.button("Cerrar Sesión", type="secondary", use_container_width=True):
+            logout()
+
         st.title("Panel de Administración - LAS MARIAS")
-        
-        opciones_menu = ["🛒 Ventas y Cocina", "📦 Control de Stock", "🏊‍♂️ Control de piscina", "⚽ Control de Cancha", "💰 Caja y Reportes"]
-        pestana_url = obtener_parametro_url("tab")
-        pestana_inicial = pestana_url if pestana_url in opciones_menu else opciones_menu[0]
-        menu = st.tabs(opciones_menu, default=pestana_inicial, key="pestana_admin", on_change=guardar_pestana_admin)
+        st.markdown(
+            f"""
+            <div class="module-subtitle">
+                <strong>{titulos_modulos[modulo_actual]}</strong>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
         
         # ---------------------------------------------------------------------
         # PESTAÑA 1: VENTAS Y COCINA (SOLUCIÓN DEFINITIVA SIN COMPROBANTES FANTASMAS)
         # ---------------------------------------------------------------------
-        with menu[0]:
-            st.header("Generar Nueva Venta / Crédito")
-            
+        if modulo_actual == opciones_menu[0]:
             # --- DETECTOR DE CAMBIO DE FORMULARIO/PESTAÑA ---
             # Si el usuario hace clic en otra pestaña, forzamos que el ticket desaparezca de la memoria
             if "pestaña_actual" not in st.session_state:
@@ -788,10 +991,30 @@ else:
                 else:
                     st.success("¡Cocina al día!")
 
+                with st.expander("Ver historial de platos entregados", expanded=False):
+                    historial_cocina = ejecutar_query(
+                        "SELECT id, cliente, plato, cantidad, COALESCE(fecha_entrega, fecha_hora), fecha_hora FROM cocina WHERE estado='ENTREGADO' ORDER BY COALESCE(fecha_entrega, fecha_hora) DESC LIMIT 80",
+                        fetch=True
+                    )
+                    if historial_cocina:
+                        df_hist_cocina = pd.DataFrame(
+                            historial_cocina,
+                            columns=["ID Pedido", "Cliente / Mesa", "Plato", "Cantidad", "Hora de entrega", "Hora de pedido"]
+                        )
+                        st.dataframe(df_hist_cocina, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("Aún no hay platos entregados para mostrar.")
+
             # --- COLUMNA DERECHA: CARRITO DE COMPRAS Y OPCIONES DE PAGO ---
             with col_v2:
                 st.subheader("📋 Lista de compra del Cliente")
-                tipo_pago = st.radio("Destino de la Venta:", ["PAGADO AL INSTANTE", "LLEVAR A CUENTA CRÉDITO (Anotar en lista histórica)"], key="rad_tipo_pago_maestro")
+                with st.container(key="payment_destination_card"):
+                    tipo_pago = st.radio(
+                        "Destino de la Venta:",
+                        ["PAGADO AL INSTANTE", "LLEVAR A CUENTA CRÉDITO (Anotar en lista histórica)"],
+                        key="rad_tipo_pago_maestro",
+                        horizontal=True
+                    )
                 
                 # Buscador inteligente de clientes para la cuenta de crédito
                 cliente_final = "GENERAL"
@@ -812,7 +1035,13 @@ else:
                 # Renderizar la tabla del carrito si tiene elementos
                 if st.session_state['carrito']:
                     df_carrito = pd.DataFrame(st.session_state['carrito'])
-                    st.table(df_carrito[["producto", "cantidad", "subtotal"]])
+                    df_carrito_vista = df_carrito[["producto", "cantidad", "subtotal"]].rename(columns={
+                        "producto": "Producto",
+                        "cantidad": "Cantidad",
+                        "subtotal": "Total Parcial"
+                    })
+                    df_carrito_vista = formatear_montos_df(df_carrito_vista, ["Total Parcial"])
+                    st.table(df_carrito_vista)
                     
                     total_carrito = df_carrito["subtotal"].sum()
                     st.markdown(f"### **Total a Pagar: S/. {total_carrito:.2f}**")
@@ -890,7 +1119,7 @@ else:
                     
                     if creditos:
                         df_cred = pd.DataFrame(creditos, columns=["ID Lista", "Cliente", "Monto Total", "Fecha"])
-                        st.dataframe(df_cred, use_container_width=True, hide_index=True)
+                        st.dataframe(formatear_montos_df(df_cred, ["Monto Total"]), use_container_width=True, hide_index=True)
                         
                         lista_clientes_deuda = sorted(list(set([c[1] for c in creditos])))
                         cliente_a_cobrar = st.selectbox("Seleccione el Cliente para revisar/liquidar cuenta:", lista_clientes_deuda, key="sb_cobrar_final")
@@ -901,7 +1130,7 @@ else:
                             if detalles:
                                 st.markdown(f"**Detalle de consumo real para: {cliente_a_cobrar}**")
                                 df_detalles = pd.DataFrame(detalles, columns=["Producto", "Cantidad", "Unidad P.", "Total parcial"])
-                                st.table(df_detalles)
+                                st.table(formatear_montos_df(df_detalles, ["Unidad P.", "Total parcial"]))
                                 
                                 total_deuda = df_detalles["Total parcial"].sum()
                                 
@@ -957,8 +1186,7 @@ else:
         # ---------------------------------------------------------------------
         # PESTAÑA 2: CONTROL DE STOCK (TÍTULOS SIN EMOJIS)
         # ---------------------------------------------------------------------
-        with menu[1]:
-            st.header("Control e Ingreso de Mercadería")
+        elif modulo_actual == opciones_menu[1]:
             col_st1, col_st2 = st.columns([1.2, 1])
             
             with col_st1:
@@ -1040,9 +1268,7 @@ else:
         # ---------------------------------------------------------------------
         # PESTAÑA 3: CONTROL DE PISCINA (ACTUALIZADO SIN EMOJIS EN SUBTEXTOS)
         # ---------------------------------------------------------------------
-        with menu[2]:
-            st.header("Ingreso y Control de la Piscina")
-            
+        elif modulo_actual == opciones_menu[2]:
             # Consultamos las tarifas actuales de la base de datos
             tarifas_db = ejecutar_query("SELECT categoria, precio FROM tarifas", fetch=True)
             dict_tarifas = {t[0]: t[1] for t in tarifas_db} if tarifas_db else {}
@@ -1083,12 +1309,15 @@ else:
                 st.warning(f"Pago Sugerido: S/. {calculo_sugerido:.2f}")
                 
                 monto_final = st.number_input("Monto Final Recibido", min_value=0.0, value=float(calculo_sugerido), step=1.0)
+                monto_mayor_al_sugerido = monto_final > calculo_sugerido
+                if monto_mayor_al_sugerido:
+                    st.warning("El monto final no puede ser mayor al pago sugerido. Ajusta el importe para continuar.")
                 
                 if st.button("Registrar Ingreso Piscina", use_container_width=True, type="primary"):
                     if ninos == 0 and adultos == 0 and mayores == 0:
                         st.error("Debes ingresar al menos 1 persona para registrar la entrada.")
-                    elif monto_final < calculo_sugerido:
-                        st.error("El monto final recibido no puede ser menor al pago sugerido.")
+                    elif monto_mayor_al_sugerido:
+                        st.error("No se guardó el ingreso porque el monto final supera el pago sugerido.")
                     else:
                         # Registro en base de datos manteniendo el control de caja abierto para los turnos
                         fecha_registro = datetime.now().strftime('%Y-%m-%d %H:%M')
@@ -1109,8 +1338,27 @@ else:
                             items_piscina_ticket.append({"producto": "ENTRADA PISCINA (ANCIANO)", "cantidad": mayores, "subtotal": mayores * p_mayor})
                         
                         # Disparador del ticket de acceso
-                        mostrar_ticket_multiple("CLIENTE PISCINA", items_piscina_ticket, monto_final, "ACCESO PISCINA")
-                        st.rerun()
+                        st.session_state["ticket_piscina_listo"] = True
+                        st.session_state["ticket_piscina_items"] = items_piscina_ticket
+                        st.session_state["ticket_piscina_total"] = monto_final
+                        st.session_state["ticket_piscina_fecha"] = fecha_registro
+
+                if st.session_state.get("ticket_piscina_listo"):
+                    st.markdown("---")
+                    st.markdown("### Comprobante de Piscina Generado")
+                    with st.container(border=True):
+                        mostrar_ticket_multiple(
+                            "CLIENTE PISCINA",
+                            st.session_state.get("ticket_piscina_items", []),
+                            st.session_state.get("ticket_piscina_total", 0.0),
+                            "ACCESO PISCINA"
+                        )
+                        if st.button("Confirmar y Quitar Boleta de Piscina", use_container_width=True, type="primary", key="btn_cerrar_ticket_piscina"):
+                            st.session_state["ticket_piscina_listo"] = False
+                            st.session_state["ticket_piscina_items"] = []
+                            st.session_state["ticket_piscina_total"] = 0.0
+                            st.session_state["ticket_piscina_fecha"] = ""
+                            st.rerun()
             
             # --- COLUMNA 2: CONFIGURACIÓN DE TARIFAS POR CATEGORÍA ---
             with col_p2:
@@ -1139,7 +1387,7 @@ else:
         # ---------------------------------------------------------------------
         # PESTAÑA 4: CONTROL DE CANCHAS (CORRECCIÓN DE TRADUCCIÓN Y BUSCADOR LIQUIDACIÓN)
         # ---------------------------------------------------------------------
-        with menu[3]:
+        elif modulo_actual == opciones_menu[3]:
             # Inyección para desactivar el autocompletado/sugerencias del navegador en los inputs
             st.markdown(
                 """
@@ -1151,9 +1399,6 @@ else:
                 """, 
                 unsafe_allow_html=True
             )
-
-            st.header("Reservas de Cancha")
-            
             tarifas_c_db = ejecutar_query("SELECT tipo, precio FROM tarifas_cancha", fetch=True)
             dict_t_cancha = {tc[0]: tc[1] for tc in tarifas_c_db} if tarifas_c_db else {}
             
@@ -1281,9 +1526,7 @@ else:
         # ---------------------------------------------------------------------
         # PESTAÑA 5: CAJA Y REPORTES DIARIOS (100% BLINDADA CONTRA COMPROBANTES FANTASMAS)
         # ---------------------------------------------------------------------
-        with menu[4]:
-            st.header("Control de Finanzas y Cierre de Caja Diaria")
-            
+        elif modulo_actual == opciones_menu[4]:
             # --- LIMPIEZA PROACTIVA DE BOLETAS AL ENTRAR A FINANZAS ---
             # Si el usuario entra aquí, apagamos inmediatamente cualquier rastro del ticket de la Pestaña 1
             if "ticket_listo" in st.session_state:
@@ -1446,7 +1689,93 @@ else:
     # =========================================================================
     # ROL: COCINERO (MEJORADO CON AGRUPACIÓN Y DISEÑO OPTIMIZADO V2)
     # =========================================================================
+        # ---------------------------------------------------------------------
+        # PESTAÑA 6: CONFIGURACION, MARCA, RESPALDOS Y SOPORTE
+        # ---------------------------------------------------------------------
+        elif modulo_actual == opciones_menu[5]:
+            st.caption("Administra identidad visual, respaldo de datos y canales de soporte.")
+
+            col_cfg1, col_cfg2 = st.columns([1, 1])
+
+            with col_cfg1:
+                st.subheader("Identidad visual")
+                logo_actual = obtener_config("logo_path")
+                if logo_actual and Path(logo_actual).exists():
+                    st.image(logo_actual, width=150, caption="Logo actual")
+                nuevo_logo = st.file_uploader(
+                    "Logo del sistema",
+                    type=["png", "jpg", "jpeg", "webp"],
+                    key="upload_logo_sistema"
+                )
+                if nuevo_logo and st.button("Guardar logo", type="primary", use_container_width=True):
+                    ruta_logo = guardar_archivo_subido(nuevo_logo, "logo_sistema")
+                    guardar_config("logo_path", ruta_logo)
+                    st.success("Logo actualizado correctamente.")
+                    st.rerun()
+
+                st.markdown("---")
+                fondo_actual = obtener_config("login_background_path")
+                if fondo_actual and Path(fondo_actual).exists():
+                    st.image(fondo_actual, caption="Fondo actual del inicio de sesión", use_container_width=True)
+                nuevo_fondo = st.file_uploader(
+                    "Imagen de fondo del inicio de sesión",
+                    type=["png", "jpg", "jpeg", "webp"],
+                    key="upload_fondo_login"
+                )
+                if nuevo_fondo and st.button("Guardar fondo de login", type="primary", use_container_width=True):
+                    ruta_fondo = guardar_archivo_subido(nuevo_fondo, "fondo_login")
+                    guardar_config("login_background_path", ruta_fondo)
+                    st.success("Fondo de inicio de sesión actualizado correctamente.")
+                    st.rerun()
+
+            with col_cfg2:
+                st.subheader("Copia de seguridad")
+                st.write("Genera una copia completa del archivo SQLite del sistema.")
+                if st.button("Crear copia de seguridad ahora", type="primary", use_container_width=True):
+                    backup_creado = crear_backup_base_datos()
+                    st.success(f"Copia creada: {backup_creado.name}")
+
+                backups = sorted(BACKUP_DIR.glob("*.db"), reverse=True)
+                if backups:
+                    df_backups = pd.DataFrame(
+                        [
+                            {
+                                "Archivo": b.name,
+                                "Fecha": datetime.fromtimestamp(b.stat().st_mtime).strftime("%d/%m/%Y %H:%M"),
+                                "Tamaño KB": round(b.stat().st_size / 1024, 2)
+                            }
+                            for b in backups[:10]
+                        ]
+                    )
+                    st.dataframe(df_backups, use_container_width=True, hide_index=True)
+                    ultimo_backup = backups[0]
+                    with ultimo_backup.open("rb") as archivo_backup:
+                        st.download_button(
+                            "Descargar última copia",
+                            data=archivo_backup,
+                            file_name=ultimo_backup.name,
+                            mime="application/octet-stream",
+                            use_container_width=True
+                        )
+                else:
+                    st.info("Todavía no hay copias de seguridad creadas.")
+
+            st.markdown("---")
+            st.subheader("Soporte")
+            st.markdown("""
+            <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px;">
+                <a href="https://wa.me/51997630035" target="_blank" style="display:block; padding:14px 16px; border-radius:6px; background:#0f9ca7; color:white; text-decoration:none; font-weight:800; text-align:center;">
+                    WhatsApp: +51 997630035
+                </a>
+                <a href="mailto:pacvangel2002@omail.com" style="display:block; padding:14px 16px; border-radius:6px; background:#1f2933; color:white; text-decoration:none; font-weight:800; text-align:center;">
+                    Correo: pacvangel2002@omail.com
+                </a>
+            </div>
+            """, unsafe_allow_html=True)
+
     elif st.session_state['rol'] == "Cocinero":
+        if st.sidebar.button("Cerrar Sesión", type="secondary", use_container_width=True):
+            logout()
         st.title("👨‍🍳 Monitor de Cocina - LAS MARÍAS")
         
         # Consultamos todos los platos pendientes
@@ -1478,8 +1807,24 @@ else:
                     
                     # Botón para despachar todo el grupo de platos juntos
                     if st.button(f"✓ Entregar Pedido Completo (IDs: {data['ids']})", key=f"btn_{data['ids']}"):
+                        fecha_entrega = datetime.now().strftime('%Y-%m-%d %H:%M')
                         for id_individual in data['ids']:
-                            ejecutar_query("UPDATE cocina SET estado='ENTREGADO' WHERE id=?", (id_individual,), commit=True)
+                            ejecutar_query("UPDATE cocina SET estado='ENTREGADO', fecha_entrega=? WHERE id=?", (fecha_entrega, id_individual), commit=True)
                         st.rerun()
         else:
             st.success("¡No hay pedidos pendientes en la cocina!")
+
+        st.markdown("---")
+        with st.expander("Historial de platos entregados", expanded=False):
+            historial_cocina = ejecutar_query(
+                "SELECT id, cliente, plato, cantidad, COALESCE(fecha_entrega, fecha_hora), fecha_hora FROM cocina WHERE estado='ENTREGADO' ORDER BY COALESCE(fecha_entrega, fecha_hora) DESC LIMIT 120",
+                fetch=True
+            )
+            if historial_cocina:
+                df_hist_cocina = pd.DataFrame(
+                    historial_cocina,
+                    columns=["ID Pedido", "Cliente / Mesa", "Plato", "Cantidad", "Hora de entrega", "Hora de pedido"]
+                )
+                st.dataframe(df_hist_cocina, use_container_width=True, hide_index=True)
+            else:
+                st.info("Aún no hay platos entregados para mostrar.")
