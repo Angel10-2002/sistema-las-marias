@@ -5,6 +5,8 @@ import secrets
 import base64
 import mimetypes
 import shutil
+import zipfile
+import ast
 from datetime import datetime
 from pathlib import Path
 
@@ -28,6 +30,10 @@ def asegurar_estructura_db():
     cursor.execute('''CREATE TABLE IF NOT EXISTS tarifas (categoria TEXT PRIMARY KEY, precio REAL)''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS tarifas_cancha (tipo TEXT PRIMARY KEY, precio REAL)''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS configuracion (clave TEXT PRIMARY KEY, valor TEXT)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS trabajadores (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT UNIQUE, rol TEXT, asistio_hoy TEXT DEFAULT 'SI', activo INTEGER DEFAULT 1)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS tarifas_local (area TEXT PRIMARY KEY, precio REAL)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS reservas_local (id INTEGER PRIMARY KEY AUTOINCREMENT, cliente TEXT, area TEXT, fecha_reserva TEXT, horario TEXT, monto_total REAL, estado TEXT, metodo_pago TEXT, receptor_tipo TEXT, receptor_nombre TEXT, trabajador TEXT, estado_caja TEXT DEFAULT 'ABIERTO', id_cierre INTEGER)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS boletas_liberadas (id INTEGER PRIMARY KEY AUTOINCREMENT, venta_id INTEGER, cliente TEXT, total REAL, items TEXT, fecha_liberacion TEXT, estado TEXT DEFAULT 'LIBERADA')''')
     
     # Tabla piscina con estado_caja para permitir el reinicio correcto en los cierres
     cursor.execute('''
@@ -115,6 +121,52 @@ def asegurar_estructura_db():
         try: cursor.execute("ALTER TABLE cocina ADD COLUMN fecha_entrega TEXT")
         except: pass
 
+    columnas_migracion = {
+        "ventas": [
+            ("id_cierre", "INTEGER"),
+            ("atendido_por_tipo", "TEXT"),
+            ("atendido_por_nombre", "TEXT"),
+            ("metodo_pago", "TEXT DEFAULT 'Efectivo'"),
+            ("receptor_tipo", "TEXT DEFAULT 'Caja Chica'"),
+            ("receptor_nombre", "TEXT"),
+            ("origen", "TEXT DEFAULT 'Ventas'"),
+            ("estado_boleta", "TEXT DEFAULT 'ACTIVA'")
+        ],
+        "detalle_creditos": [
+            ("origen", "TEXT DEFAULT 'Ventas'"),
+            ("referencia_id", "INTEGER")
+        ],
+        "piscina": [
+            ("id_cierre", "INTEGER"),
+            ("cliente", "TEXT DEFAULT 'CLIENTE PISCINA'"),
+            ("metodo_pago", "TEXT DEFAULT 'Efectivo'"),
+            ("receptor_tipo", "TEXT DEFAULT 'Caja Chica'"),
+            ("receptor_nombre", "TEXT"),
+            ("trabajador", "TEXT"),
+            ("destino", "TEXT DEFAULT 'PAGADO'"),
+            ("estado", "TEXT DEFAULT 'PAGADO'")
+        ],
+        "cancha": [
+            ("id_cierre", "INTEGER"),
+            ("metodo_pago", "TEXT DEFAULT 'Efectivo'"),
+            ("receptor_tipo", "TEXT DEFAULT 'Caja Chica'"),
+            ("receptor_nombre", "TEXT"),
+            ("trabajador", "TEXT")
+        ],
+        "cocina": [
+            ("modificado_en", "TEXT")
+        ]
+    }
+    for tabla, columnas in columnas_migracion.items():
+        cursor.execute(f"PRAGMA table_info({tabla})")
+        existentes = [col[1] for col in cursor.fetchall()]
+        for nombre_col, tipo_col in columnas:
+            if nombre_col not in existentes:
+                try:
+                    cursor.execute(f"ALTER TABLE {tabla} ADD COLUMN {nombre_col} {tipo_col}")
+                except:
+                    pass
+
     # Registros iniciales por defecto
     cursor.execute("INSERT OR IGNORE INTO usuarios (username, password, rol) VALUES ('administrador', 'admin123', 'Administrador')")
     cursor.execute("INSERT OR IGNORE INTO usuarios (username, password, rol) VALUES ('cocinero', 'cocina123', 'Cocinero')")
@@ -123,6 +175,10 @@ def asegurar_estructura_db():
     cursor.execute("INSERT OR IGNORE INTO tarifas VALUES ('Mayores', 7.0)")
     cursor.execute("INSERT OR IGNORE INTO tarifas_cancha VALUES ('Cancha Grande', 70.0)")
     cursor.execute("INSERT OR IGNORE INTO tarifas_cancha VALUES ('Media Cancha', 40.0)")
+    cursor.execute("INSERT OR IGNORE INTO tarifas_cancha VALUES ('Cancha Mediana 1', 40.0)")
+    cursor.execute("INSERT OR IGNORE INTO tarifas_cancha VALUES ('Cancha Mediana 2', 40.0)")
+    cursor.execute("INSERT OR IGNORE INTO tarifas_local VALUES ('Comedor Principal', 0.0)")
+    cursor.execute("INSERT OR IGNORE INTO tarifas_local VALUES ('Comedor Piscina', 0.0)")
     
     conn.commit()
     conn.close()
@@ -140,6 +196,81 @@ def ejecutar_query(query, params=(), fetch=False, commit=False):
         conn.commit()
     conn.close()
     return res
+
+def trabajadores_por_rol(roles=("Mesero", "Trabajador")):
+    marcadores = ",".join(["?"] * len(roles))
+    filas = ejecutar_query(
+        f"SELECT nombre, rol FROM trabajadores WHERE activo=1 AND rol IN ({marcadores}) ORDER BY rol, nombre",
+        tuple(roles),
+        fetch=True
+    )
+    return filas or []
+
+def seleccionar_trabajador(label, roles=("Mesero", "Trabajador"), key_prefix="trab"):
+    personas = trabajadores_por_rol(roles)
+    opciones = ["SIN ASIGNAR"] + [f"{nombre} ({rol})" for nombre, rol in personas]
+    elegido = st.selectbox(label, opciones, key=f"{key_prefix}_selector")
+    if elegido == "SIN ASIGNAR":
+        return "", ""
+    nombre = elegido.rsplit(" (", 1)[0]
+    rol = elegido.rsplit("(", 1)[1].replace(")", "")
+    return rol, nombre
+
+def seleccionar_pago_receptor(key_prefix, incluir_mesero=True):
+    metodo_pago = st.selectbox("Metodo de Pago", ["Efectivo", "Yape", "Tarjeta"], key=f"{key_prefix}_metodo_pago")
+    opciones_receptor = ["Caja Chica", "Trabajador"] + (["Mesero"] if incluir_mesero else [])
+    receptor_tipo = st.selectbox("Pago recibido por", opciones_receptor, key=f"{key_prefix}_receptor_tipo")
+    receptor_nombre = ""
+    if receptor_tipo in ("Trabajador", "Mesero"):
+        _, receptor_nombre = seleccionar_trabajador(
+            f"Seleccione {receptor_tipo}",
+            roles=(receptor_tipo,),
+            key_prefix=f"{key_prefix}_receptor"
+        )
+        if not receptor_nombre:
+            st.warning(f"Registre o seleccione un {receptor_tipo.lower()} para completar el receptor.")
+    return metodo_pago, receptor_tipo, receptor_nombre
+
+def registrar_credito_cliente(cliente, origen, producto, cantidad, precio_unitario, subtotal, fecha, referencia_id=None):
+    cliente_normalizado = cliente.strip().upper() if cliente and cliente.strip() else "GENERAL"
+    existente = ejecutar_query(
+        "SELECT id, total FROM ventas WHERE cliente=? AND estado='CREDITO' AND origen=?",
+        (cliente_normalizado, origen),
+        fetch=True
+    )
+    if existente:
+        id_venta, total_actual = existente[0]
+        ejecutar_query("UPDATE ventas SET total=? WHERE id=?", ((total_actual or 0) + subtotal, id_venta), commit=True)
+    else:
+        ejecutar_query(
+            "INSERT INTO ventas (cliente, total, estado, fecha, estado_caja, origen) VALUES (?,?,?,?, 'ABIERTO', ?)",
+            (cliente_normalizado, subtotal, "CREDITO", fecha, origen),
+            commit=True
+        )
+    ejecutar_query(
+        "INSERT INTO detalle_creditos (cliente, producto, cantidad, precio_unitario, subtotal, fecha, origen, referencia_id) VALUES (?,?,?,?,?,?,?,?)",
+        (cliente_normalizado, producto, cantidad, precio_unitario, subtotal, fecha, origen, referencia_id),
+        commit=True
+    )
+
+def deudas_centralizadas():
+    return ejecutar_query(
+        "SELECT cliente, origen, producto, cantidad, subtotal, fecha FROM detalle_creditos ORDER BY cliente, fecha DESC",
+        fetch=True
+    ) or []
+
+def marcar_notificacion_cocina(cliente, descripcion):
+    fecha_mod = datetime.now().strftime('%Y-%m-%d %H:%M')
+    ejecutar_query(
+        "UPDATE cocina SET modificado_en=? WHERE cliente=? AND estado='PENDIENTE'",
+        (fecha_mod, cliente),
+        commit=True
+    )
+    st.session_state["ultima_modificacion_cocina"] = {
+        "cliente": cliente,
+        "descripcion": descripcion,
+        "fecha": fecha_mod
+    }
 
 def formatear_montos_df(df, columnas):
     df_formateado = df.copy()
@@ -186,7 +317,15 @@ def crear_backup_base_datos():
     marca_tiempo = datetime.now().strftime("%Y%m%d_%H%M%S")
     destino = BACKUP_DIR / f"backup_complejo_{marca_tiempo}.db"
     shutil.copy2(origen, destino)
-    return destino
+    excel_destino = BACKUP_DIR / f"historial_cajas_{marca_tiempo}.xlsx"
+    try:
+        historial = ejecutar_query("SELECT id, fecha_cierre, total_vendido, usuario_cierre FROM historial_cajas ORDER BY id DESC", fetch=True)
+        df_historial = pd.DataFrame(historial or [], columns=["ID Cierre", "Fecha Cierre", "Total Vendido", "Usuario Cierre"])
+        with pd.ExcelWriter(excel_destino) as writer:
+            df_historial.to_excel(writer, sheet_name="Historial Cajas", index=False)
+    except Exception:
+        excel_destino = None
+    return destino, excel_destino
 
 preparar_directorios_sistema()
 
@@ -196,7 +335,7 @@ if 'carrito' not in st.session_state:
 
 # --- MODAL DE IMPRESIÓN REFORMATEADO Y OPTIMIZADO PARA IMPRESORA TÉRMICA ---
 @st.dialog("📄 Boleto de Venta - LAS MARÍAS")
-def mostrar_ticket_multiple(cliente, items, total, tipo):
+def mostrar_ticket_multiple(cliente, items, total, tipo, vendedor=""):
     fecha_ticket = datetime.now().strftime('%d/%m/%Y %H:%M')
     
     # Construcción de los items en filas HTML limpias
@@ -219,6 +358,7 @@ def mostrar_ticket_multiple(cliente, items, total, tipo):
     <div id="ticket-termico" style="font-family: 'Courier New', Courier, monospace; color: black; background-color: white; padding: 10px; width: 280px; margin: 0 auto; line-height: 1.3;">
         
         <div style="text-align: center; margin-bottom: 8px;">
+            <b style="font-size: 15px; letter-spacing: 1px;">NOTA DE VENTA - LAS MARIAS</b><br>
             <b style="font-size: 16px; letter-spacing: 1px;">RC. LAS MARÍAS</b><br>
             <span style="font-size: 11px; color: #333;">COMPLEJO RECREATIVO</span><br>
             <span style="font-size: 11px; color: #333;">Sullana, Piura, Perú</span><br>
@@ -228,6 +368,7 @@ def mostrar_ticket_multiple(cliente, items, total, tipo):
         <div style="font-size: 12px; margin-bottom: 8px; text-align: left;">
             <b>FECHA:</b> {fecha_ticket}<br>
             <b>CLIENTE:</b> {cliente}<br>
+            {f"<b>VENDEDOR:</b> {vendedor}<br>" if vendedor else ""}
             <b>OP:</b> {tipo}<br>
             <small>----------------------------------</small>
         </div>
@@ -814,6 +955,8 @@ else:
             "💰 Caja y Reportes",
             "⚙️ Configuración"
         ]
+        opciones_menu.insert(5, "Trabajadores")
+        opciones_menu.insert(6, "Reservacion de Local")
         titulos_modulos = {
             opciones_menu[0]: "Generar Nueva Venta / Crédito",
             opciones_menu[1]: "Control e Ingreso de Mercadería",
@@ -822,6 +965,9 @@ else:
             opciones_menu[4]: "Control de Finanzas y Cierre de Caja Diaria",
             opciones_menu[5]: "Configuración del Sistema"
         }
+        titulos_modulos[opciones_menu[5]] = "Gestion de Personal"
+        titulos_modulos[opciones_menu[6]] = "Reservacion de Local"
+        titulos_modulos[opciones_menu[7]] = "Configuracion del Sistema"
         modulo_actual = resolver_modulo_admin(opciones_menu)
         st.sidebar.markdown("### Menú Principal")
         st.sidebar.radio(
@@ -876,7 +1022,7 @@ else:
             # --- COLUMNA IZQUIERDA: AGREGAR PRODUCTOS Y MONITOR DE COCINA ---
             with col_v1:
                 if dict_productos:
-                    prod_sel = st.selectbox("Seleccione el Producto/Plato", list(dict_productos.keys()), key="sb_producto_venta")
+                    prod_sel = st.selectbox("Seleccione el Producto/Plato", [""] + list(dict_productos.keys()), key="sb_producto_venta")
                     cant = st.number_input("Cantidad", min_value=1, value=1, key="num_cantidad_venta")
                     
                     if prod_sel:
@@ -1031,6 +1177,10 @@ else:
                 else:
                     cliente_input = st.text_input("Nombre del Cliente / Mesa:", value="General", key="txt_cliente_mostrador")
                     cliente_final = cliente_input.strip().upper() if cliente_input.strip() else "GENERAL"
+
+                st.markdown("### Atendido por")
+                atendido_tipo, atendido_nombre = seleccionar_trabajador("Mesero o Trabajador", ("Mesero", "Trabajador"), "venta_atendido")
+                metodo_pago_venta, receptor_tipo_venta, receptor_nombre_venta = seleccionar_pago_receptor("venta", incluir_mesero=True)
                 
                 # Renderizar la tabla del carrito si tiene elementos
                 if st.session_state['carrito']:
@@ -1075,13 +1225,20 @@ else:
                                     if existe_cabecera:
                                         id_venta_existente, total_antiguo = existe_cabecera[0]
                                         nuevo_total_maestro = total_antiguo + total_carrito
-                                        ejecutar_query("UPDATE ventas SET total=? WHERE id=?", (nuevo_total_maestro, id_venta_existente), commit=True)
+                                        ejecutar_query(
+                                            "UPDATE ventas SET total=?, atendido_por_tipo=?, atendido_por_nombre=?, metodo_pago=?, receptor_tipo=?, receptor_nombre=?, origen='Ventas' WHERE id=?",
+                                            (nuevo_total_maestro, atendido_tipo, atendido_nombre, metodo_pago_venta, receptor_tipo_venta, receptor_nombre_venta, id_venta_existente),
+                                            commit=True
+                                        )
                                     else:
-                                        ejecutar_query("INSERT INTO ventas (cliente, total, estado, fecha, estado_caja) VALUES (?,?,?,?, 'ABIERTO')",
-                                                       (cliente_final, total_carrito, "CREDITO", fecha_actual), commit=True)
+                                        ejecutar_query(
+                                            "INSERT INTO ventas (cliente, total, estado, fecha, estado_caja, atendido_por_tipo, atendido_por_nombre, metodo_pago, receptor_tipo, receptor_nombre, origen) VALUES (?,?,?,?, 'ABIERTO', ?,?,?,?,?, 'Ventas')",
+                                            (cliente_final, total_carrito, "CREDITO", fecha_actual, atendido_tipo, atendido_nombre, metodo_pago_venta, receptor_tipo_venta, receptor_nombre_venta),
+                                            commit=True
+                                        )
                                     
                                     for item in st.session_state['carrito']:
-                                        ejecutar_query("INSERT INTO detalle_creditos (cliente, producto, cantidad, precio_unitario, subtotal, fecha) VALUES (?,?,?,?,?,?)",
+                                        ejecutar_query("INSERT INTO detalle_creditos (cliente, producto, cantidad, precio_unitario, subtotal, fecha, origen) VALUES (?,?,?,?,?,?, 'Ventas')",
                                                        (cliente_final, item['producto'], item['cantidad'], item['precio_unitario'], item['subtotal'], fecha_actual), commit=True)
                                     
                                     st.success(f"¡Cargado con éxito al crédito de {cliente_final}!")
@@ -1090,8 +1247,11 @@ else:
                                 
                                 # C. Si es pago al instante (CONTROLADO LOCALMENTE)
                                 else:
-                                    ejecutar_query("INSERT INTO ventas (cliente, total, estado, fecha, estado_caja) VALUES (?,?,?,?, 'ABIERTO')",
-                                                   (cliente_final, total_carrito, "PAGADO", fecha_actual), commit=True)
+                                    ejecutar_query(
+                                        "INSERT INTO ventas (cliente, total, estado, fecha, estado_caja, atendido_por_tipo, atendido_por_nombre, metodo_pago, receptor_tipo, receptor_nombre, origen) VALUES (?,?,?,?, 'ABIERTO', ?,?,?,?,?, 'Ventas')",
+                                        (cliente_final, total_carrito, "PAGADO", fecha_actual, atendido_tipo, atendido_nombre, metodo_pago_venta, receptor_tipo_venta, receptor_nombre_venta),
+                                        commit=True
+                                    )
                                     
                                     ultimo_id_req = ejecutar_query("SELECT max(id) FROM ventas", fetch=True)
                                     venta_id = ultimo_id_req[0][0] if ultimo_id_req else 1
@@ -1105,6 +1265,7 @@ else:
                                     st.session_state["ticket_items"] = list(st.session_state['carrito'])
                                     st.session_state["ticket_total"] = total_carrito
                                     st.session_state["ticket_tipo"] = "VENTA EN MOSTRADOR"
+                                    st.session_state["ticket_vendedor"] = atendido_nombre
                                     st.session_state["ticket_listo"] = True
                                     
                                     st.session_state['carrito'] = []
@@ -1135,7 +1296,11 @@ else:
                                 total_deuda = df_detalles["Total parcial"].sum()
                                 
                                 if st.button(f"💵 Cerrar Cuenta y Cobrar S/. {total_deuda:.2f}", type="primary", use_container_width=True, key="btn_liquidar_final"):
-                                    ejecutar_query("UPDATE ventas SET estado='PAGADO' WHERE cliente=? AND estado='CREDITO'", (cliente_a_cobrar,), commit=True)
+                                    ejecutar_query(
+                                        "UPDATE ventas SET estado='PAGADO', metodo_pago=?, receptor_tipo=?, receptor_nombre=? WHERE cliente=? AND estado='CREDITO'",
+                                        (metodo_pago_venta, receptor_tipo_venta, receptor_nombre_venta, cliente_a_cobrar),
+                                        commit=True
+                                    )
                                     
                                     items_boleta = []
                                     for prod, cant_b, p_uni, sub in detalles:
@@ -1153,17 +1318,118 @@ else:
                                     st.session_state["ticket_items"] = items_boleta
                                     st.session_state["ticket_total"] = total_deuda
                                     st.session_state["ticket_tipo"] = "LIQUIDACIÓN DE CRÉDITO"
+                                    st.session_state["ticket_vendedor"] = atendido_nombre
                                     st.session_state["ticket_listo"] = True
                                     st.rerun()
                     else:
                         st.info("No hay deudas pendientes.")
+
+                st.markdown("---")
+                with st.expander("Modificar Nota de Venta / Liberar Boleta", expanded=False):
+                    ventas_editables = ejecutar_query(
+                        "SELECT id, cliente, total, estado, fecha FROM ventas WHERE estado IN ('PAGADO','CREDITO') AND COALESCE(estado_boleta,'ACTIVA')='ACTIVA' ORDER BY id DESC LIMIT 80",
+                        fetch=True
+                    )
+                    if ventas_editables:
+                        opciones_ventas = {f"Nota #{v[0]} - {v[1]} - S/. {v[2]:.2f} ({v[3]})": v[0] for v in ventas_editables}
+                        venta_label = st.selectbox("Seleccione nota", list(opciones_ventas.keys()), key="sb_editar_nota_venta")
+                        venta_editar_id = opciones_ventas[venta_label]
+                        venta_info = ejecutar_query("SELECT cliente, estado FROM ventas WHERE id=?", (venta_editar_id,), fetch=True)[0]
+                        cliente_actual_nota, estado_actual_nota = venta_info
+                        nuevo_cliente_nota = st.text_input("Cliente", value=cliente_actual_nota, key="txt_cliente_edit_nota").strip().upper()
+                        detalles_nota = ejecutar_query("SELECT id, producto, cantidad, precio_unitario, subtotal FROM detalle_ventas WHERE venta_id=?", (venta_editar_id,), fetch=True)
+                        if not detalles_nota and estado_actual_nota == "CREDITO":
+                            detalles_nota = ejecutar_query("SELECT id, producto, cantidad, precio_unitario, subtotal FROM detalle_creditos WHERE cliente=?", (cliente_actual_nota,), fetch=True)
+                        if detalles_nota:
+                            st.dataframe(pd.DataFrame(detalles_nota, columns=["ID Detalle", "Producto", "Cantidad", "Precio", "Subtotal"]), use_container_width=True, hide_index=True)
+                            ids_detalle = {f"{d[1]} x {d[2]}": d[0] for d in detalles_nota}
+                            detalle_sel = st.selectbox("Item a modificar/eliminar", list(ids_detalle.keys()), key="sb_item_edit_nota")
+                            nueva_cant_item = st.number_input("Nueva cantidad", min_value=1, value=1, key="num_edit_cant_nota")
+                            col_ne1, col_ne2 = st.columns(2)
+                            with col_ne1:
+                                if st.button("Modificar cantidad", use_container_width=True, key="btn_mod_cant_nota"):
+                                    det_id = ids_detalle[detalle_sel]
+                                    tabla_det = "detalle_creditos" if estado_actual_nota == "CREDITO" else "detalle_ventas"
+                                    precio_det = ejecutar_query(f"SELECT precio_unitario FROM {tabla_det} WHERE id=?", (det_id,), fetch=True)[0][0]
+                                    ejecutar_query(f"UPDATE {tabla_det} SET cantidad=?, subtotal=? WHERE id=?", (nueva_cant_item, precio_det * nueva_cant_item, det_id), commit=True)
+                                    nuevo_total = ejecutar_query(f"SELECT SUM(subtotal) FROM {tabla_det} WHERE {'cliente=?' if tabla_det == 'detalle_creditos' else 'venta_id=?'}", (cliente_actual_nota if tabla_det == "detalle_creditos" else venta_editar_id,), fetch=True)[0][0] or 0
+                                    ejecutar_query("UPDATE ventas SET cliente=?, total=? WHERE id=?", (nuevo_cliente_nota, nuevo_total, venta_editar_id), commit=True)
+                                    marcar_notificacion_cocina(nuevo_cliente_nota, "Nota de venta modificada")
+                                    st.session_state["ticket_cliente"] = nuevo_cliente_nota
+                                    st.session_state["ticket_items"] = [{"producto": d[1], "cantidad": d[2], "subtotal": d[4]} for d in detalles_nota]
+                                    st.session_state["ticket_total"] = nuevo_total
+                                    st.session_state["ticket_tipo"] = "NOTA ACTUALIZADA"
+                                    st.session_state["ticket_listo"] = True
+                                    st.rerun()
+                            with col_ne2:
+                                if st.button("Eliminar item", use_container_width=True, key="btn_del_item_nota"):
+                                    det_id = ids_detalle[detalle_sel]
+                                    tabla_det = "detalle_creditos" if estado_actual_nota == "CREDITO" else "detalle_ventas"
+                                    ejecutar_query(f"DELETE FROM {tabla_det} WHERE id=?", (det_id,), commit=True)
+                                    nuevo_total = ejecutar_query(f"SELECT SUM(subtotal) FROM {tabla_det} WHERE {'cliente=?' if tabla_det == 'detalle_creditos' else 'venta_id=?'}", (cliente_actual_nota if tabla_det == "detalle_creditos" else venta_editar_id,), fetch=True)[0][0] or 0
+                                    ejecutar_query("UPDATE ventas SET cliente=?, total=? WHERE id=?", (nuevo_cliente_nota, nuevo_total, venta_editar_id), commit=True)
+                                    marcar_notificacion_cocina(nuevo_cliente_nota, "Producto eliminado de la nota")
+                                    st.rerun()
+                        if dict_productos:
+                            prod_extra = st.selectbox("Agregar producto", [""] + list(dict_productos.keys()), key="sb_add_prod_nota")
+                            cant_extra = st.number_input("Cantidad a agregar", min_value=1, value=1, key="num_add_prod_nota")
+                            if st.button("Agregar a nota", use_container_width=True, key="btn_add_prod_nota") and prod_extra:
+                                precio_extra = dict_productos[prod_extra]["precio"]
+                                subtotal_extra = precio_extra * cant_extra
+                                if estado_actual_nota == "CREDITO":
+                                    ejecutar_query("INSERT INTO detalle_creditos (cliente, producto, cantidad, precio_unitario, subtotal, fecha, origen) VALUES (?,?,?,?,?,?, 'Ventas')", (nuevo_cliente_nota, prod_extra, cant_extra, precio_extra, subtotal_extra, datetime.now().strftime('%Y-%m-%d %H:%M')), commit=True)
+                                    nuevo_total = ejecutar_query("SELECT SUM(subtotal) FROM detalle_creditos WHERE cliente=?", (nuevo_cliente_nota,), fetch=True)[0][0] or 0
+                                else:
+                                    ejecutar_query("INSERT INTO detalle_ventas (venta_id, producto, cantidad, precio_unitario, subtotal) VALUES (?,?,?,?,?)", (venta_editar_id, prod_extra, cant_extra, precio_extra, subtotal_extra), commit=True)
+                                    nuevo_total = ejecutar_query("SELECT SUM(subtotal) FROM detalle_ventas WHERE venta_id=?", (venta_editar_id,), fetch=True)[0][0] or 0
+                                ejecutar_query("UPDATE ventas SET cliente=?, total=? WHERE id=?", (nuevo_cliente_nota, nuevo_total, venta_editar_id), commit=True)
+                                marcar_notificacion_cocina(nuevo_cliente_nota, "Producto agregado a la nota")
+                                st.rerun()
+                        if st.button("Liberar Boleta", use_container_width=True, key="btn_liberar_boleta"):
+                            detalles_guardar = ejecutar_query("SELECT producto, cantidad, subtotal FROM detalle_ventas WHERE venta_id=?", (venta_editar_id,), fetch=True) or []
+                            ejecutar_query(
+                                "INSERT INTO boletas_liberadas (venta_id, cliente, total, items, fecha_liberacion, estado) VALUES (?,?,?,?,?, 'LIBERADA')",
+                                (venta_editar_id, cliente_actual_nota, float(venta_label.split('S/. ')[1].split(' ')[0]), str(detalles_guardar), datetime.now().strftime('%Y-%m-%d %H:%M')),
+                                commit=True
+                            )
+                            ejecutar_query("UPDATE ventas SET estado_boleta='LIBERADA', estado='LIBERADA', total=0 WHERE id=?", (venta_editar_id,), commit=True)
+                            st.warning("Boleta liberada. No contara como venta activa.")
+                            st.rerun()
+                    else:
+                        st.info("No hay notas activas para modificar.")
+
+                with st.expander("Boletas Liberadas", expanded=False):
+                    liberadas = ejecutar_query("SELECT id, venta_id, cliente, total, fecha_liberacion, estado FROM boletas_liberadas ORDER BY id DESC", fetch=True)
+                    if liberadas:
+                        st.dataframe(pd.DataFrame(liberadas, columns=["ID", "Venta Original", "Cliente", "Total Original", "Fecha", "Estado"]), use_container_width=True, hide_index=True)
+                        opciones_lib = {f"Boleta liberada #{b[0]} - {b[2]}": b[0] for b in liberadas}
+                        lib_sel = st.selectbox("Boleta a reutilizar", list(opciones_lib.keys()), key="sb_reutilizar_boleta")
+                        nuevo_cliente_lib = st.text_input("Cliente para reutilizar", key="txt_cliente_reutilizar").strip().upper()
+                        if st.button("Reutilizar boleta", use_container_width=True, key="btn_reutilizar_boleta"):
+                            fila_lib = ejecutar_query("SELECT cliente, total, items FROM boletas_liberadas WHERE id=?", (opciones_lib[lib_sel],), fetch=True)[0]
+                            cliente_reuso = nuevo_cliente_lib or fila_lib[0]
+                            fecha_reuso = datetime.now().strftime('%Y-%m-%d %H:%M')
+                            ejecutar_query("INSERT INTO ventas (cliente, total, estado, fecha, estado_caja, origen) VALUES (?,?,?,?, 'ABIERTO', 'Ventas')", (cliente_reuso, fila_lib[1], "PAGADO", fecha_reuso), commit=True)
+                            venta_reuso_id = ejecutar_query("SELECT max(id) FROM ventas", fetch=True)[0][0]
+                            try:
+                                items_reuso = ast.literal_eval(fila_lib[2]) if fila_lib[2] else []
+                            except Exception:
+                                items_reuso = []
+                            for item_reuso in items_reuso:
+                                prod_r, cant_r, sub_r = item_reuso
+                                precio_r = float(sub_r) / float(cant_r or 1)
+                                ejecutar_query("INSERT INTO detalle_ventas (venta_id, producto, cantidad, precio_unitario, subtotal) VALUES (?,?,?,?,?)", (venta_reuso_id, prod_r, cant_r, precio_r, sub_r), commit=True)
+                            ejecutar_query("UPDATE boletas_liberadas SET estado='REUTILIZADA' WHERE id=?", (opciones_lib[lib_sel],), commit=True)
+                            st.rerun()
+                    else:
+                        st.info("No hay boletas liberadas.")
 
             # --- BLOQUE DE RENDERIZADO DEL TICKET (EXCLUSIVO Y SEGURO) ---
             # Este contenedor se pinta abajo de la PESTAÑA 1 únicamente si la bandera local es True.
             # No usa Modales/Dialogs propensos a colapsar, y añade un botón para limpiar el estado por completo.
             if st.session_state["ticket_listo"]:
                 st.markdown("---")
-                st.markdown("### 📄 Comprobante Generado Exitosamente")
+                st.markdown("### Nota de Venta")
                 
                 # Caja estilizada que emula el contenedor flotante anterior, pero seguro
                 with st.container(border=True):
@@ -1171,7 +1437,8 @@ else:
                         st.session_state["ticket_cliente"],
                         st.session_state["ticket_items"],
                         st.session_state["ticket_total"],
-                        st.session_state["ticket_tipo"]
+                        st.session_state["ticket_tipo"],
+                        st.session_state.get("ticket_vendedor", "")
                     )
                     
                     if st.button("✅ Confirmar y Quitar Boleta de la Pantalla", use_container_width=True, type="primary", key="btn_cerrar_ticket_seguro"):
@@ -1286,23 +1553,21 @@ else:
                 ninos = st.number_input(
                     "Cantidad de Niños / Niñas", 
                     min_value=0, step=1, value=0,
-                    help="Considerados desde los 0 hasta los 17 años de edad."
+                    help="Considerados desde los 2 hasta los 12 años de edad."
                 )
-                st.caption("*Niños: 17 años a menos*")
+                st.caption("*Niños: 2 a 12 años*")
                 
                 adultos = st.number_input(
                     "Cantidad de Adultos", 
                     min_value=0, step=1, value=0,
-                    help="Considerados desde los 18 hasta los 50 años de edad."
+                    help="Considerados desde los 13 años a más."
                 )
-                st.caption("*Adultos: De 18 a 50 años*")
-                
-                mayores = st.number_input(
-                    "Cantidad de Adultos Mayores (Ancianos)", 
-                    min_value=0, step=1, value=0,
-                    help="Considerados desde los 51 años de edad para adelante."
-                )
-                st.caption("*Adultos Mayores: De 51 años a más*")
+                st.caption("*Adultos: 13 años a más*")
+                mayores = 0
+                cliente_piscina = st.text_input("Cliente", value="CLIENTE PISCINA", key="cliente_piscina").strip().upper() or "CLIENTE PISCINA"
+                destino_piscina = st.radio("Destino de la Venta", ["Pagado al Instante", "Llevar a Cuenta Credito"], horizontal=True, key="destino_piscina")
+                _, trabajador_piscina = seleccionar_trabajador("Trabajador que atendio", ("Trabajador",), "piscina_trabajador")
+                metodo_piscina, receptor_piscina, receptor_nombre_piscina = seleccionar_pago_receptor("piscina", incluir_mesero=False)
                 
                 # Cálculo automático en tiempo real basado en la selección
                 calculo_sugerido = (ninos * p_nino) + (adultos * p_adulto) + (mayores * p_mayor)
@@ -1321,11 +1586,15 @@ else:
                     else:
                         # Registro en base de datos manteniendo el control de caja abierto para los turnos
                         fecha_registro = datetime.now().strftime('%Y-%m-%d %H:%M')
+                        estado_piscina = "CREDITO" if destino_piscina == "Llevar a Cuenta Credito" else "PAGADO"
                         ejecutar_query(
-                            "INSERT INTO piscina (ninos, adultos, mayores, monto_pagado, fecha, estado_caja) VALUES (?,?,?,?,?, 'ABIERTO')",
-                            (ninos, adultos, mayores, monto_final, fecha_registro), 
+                            "INSERT INTO piscina (ninos, adultos, mayores, monto_pagado, fecha, estado_caja, cliente, metodo_pago, receptor_tipo, receptor_nombre, trabajador, destino, estado) VALUES (?,?,?,?,?, 'ABIERTO', ?,?,?,?,?,?,?)",
+                            (ninos, adultos, mayores, monto_final, fecha_registro, cliente_piscina, metodo_piscina, receptor_piscina, receptor_nombre_piscina, trabajador_piscina, destino_piscina, estado_piscina), 
                             commit=True
                         )
+                        piscina_id = ejecutar_query("SELECT max(id) FROM piscina", fetch=True)[0][0]
+                        if estado_piscina == "CREDITO":
+                            registrar_credito_cliente(cliente_piscina, "Piscina", "ENTRADA PISCINA", 1, monto_final, monto_final, fecha_registro, piscina_id)
                         st.success("¡Ingreso de piscina guardado exitosamente!")
                         
                         # Estructuración detallada para el ticket térmico
@@ -1342,16 +1611,18 @@ else:
                         st.session_state["ticket_piscina_items"] = items_piscina_ticket
                         st.session_state["ticket_piscina_total"] = monto_final
                         st.session_state["ticket_piscina_fecha"] = fecha_registro
+                        st.session_state["ticket_piscina_vendedor"] = trabajador_piscina
 
                 if st.session_state.get("ticket_piscina_listo"):
                     st.markdown("---")
                     st.markdown("### Comprobante de Piscina Generado")
                     with st.container(border=True):
                         mostrar_ticket_multiple(
-                            "CLIENTE PISCINA",
+                            cliente_piscina,
                             st.session_state.get("ticket_piscina_items", []),
                             st.session_state.get("ticket_piscina_total", 0.0),
-                            "ACCESO PISCINA"
+                            "ACCESO PISCINA",
+                            st.session_state.get("ticket_piscina_vendedor", "")
                         )
                         if st.button("Confirmar y Quitar Boleta de Piscina", use_container_width=True, type="primary", key="btn_cerrar_ticket_piscina"):
                             st.session_state["ticket_piscina_listo"] = False
@@ -1364,25 +1635,41 @@ else:
             with col_p2:
                 st.subheader("Panel de Tarifas Piscina")
                 nuevo_p_nino = st.number_input("Precio Entrada Niños (S/.)", min_value=0.0, value=float(p_nino), step=0.5, help="Tarifa aplicable a menores de 18 años.")
-                nuevo_p_adulto = st.number_input("Precio Entrada Adultos (S/.)", min_value=0.0, value=float(p_adulto), step=0.5, help="Tarifa aplicable de 18 a 50 años.")
-                nuevo_p_mayor = st.number_input("Precio Entrada Mayores (S/.)", min_value=0.0, value=float(p_mayor), step=0.5, help="Tarifa aplicable desde los 51 años en adelante.")
+                nuevo_p_adulto = st.number_input("Precio Entrada Adultos (S/.)", min_value=0.0, value=float(p_adulto), step=0.5, help="Tarifa aplicable desde los 13 años.")
                 
                 if st.button("🔄 Actualizar Tarifas Piscina", use_container_width=True):
                     ejecutar_query("UPDATE tarifas SET precio=? WHERE categoria='Niños'", (nuevo_p_nino,), commit=True)
                     ejecutar_query("UPDATE tarifas SET precio=? WHERE categoria='Adultos'", (nuevo_p_adulto,), commit=True)
-                    ejecutar_query("UPDATE tarifas SET precio=? WHERE categoria='Mayores'", (nuevo_p_mayor,), commit=True)
                     st.success("¡Tarifas de edad actualizadas con éxito!")
                     st.rerun()
 
             # --- COLUMNA 3: HISTORIAL RECIENTE DE ENTRADAS ---
             with col_p3:
                 st.subheader("Historial de Entradas")
-                registros_piscina = ejecutar_query("SELECT ninos, adultos, mayores, monto_pagado, fecha FROM piscina ORDER BY id DESC", fetch=True)
+                registros_piscina = ejecutar_query("SELECT ninos, adultos, monto_pagado, fecha, cliente, estado FROM piscina ORDER BY id DESC", fetch=True)
                 if registros_piscina:
-                    df_pis = pd.DataFrame(registros_piscina, columns=["Niños", "Adultos", "Adultos Mayores", "Monto", "Fecha/Hora"])
+                    df_pis = pd.DataFrame(registros_piscina, columns=["Niños", "Adultos", "Monto", "Fecha/Hora", "Cliente", "Estado"])
                     st.dataframe(df_pis, use_container_width=True, hide_index=True)
                 else:
                     st.info("No se registran ingresos a la piscina el día de hoy.")
+
+                st.markdown("---")
+                st.subheader("Cuentas por Cobrar - Piscina")
+                deudas_piscina = ejecutar_query(
+                    "SELECT cliente, producto, subtotal FROM detalle_creditos WHERE origen='Piscina' ORDER BY fecha DESC",
+                    fetch=True
+                )
+                if deudas_piscina:
+                    st.dataframe(pd.DataFrame(deudas_piscina, columns=["Cliente", "Concepto", "Monto pendiente"]), use_container_width=True, hide_index=True)
+                    clientes_piscina_deuda = sorted({d[0] for d in deudas_piscina})
+                    cli_pis_cobrar = st.selectbox("Cliente a cancelar", clientes_piscina_deuda, key="sb_cobrar_piscina")
+                    if st.button("Cancelar deuda de piscina", use_container_width=True, key="btn_cobrar_piscina"):
+                        ejecutar_query("DELETE FROM detalle_creditos WHERE cliente=? AND origen='Piscina'", (cli_pis_cobrar,), commit=True)
+                        ejecutar_query("UPDATE ventas SET estado='PAGADO' WHERE cliente=? AND origen='Piscina' AND estado='CREDITO'", (cli_pis_cobrar,), commit=True)
+                        ejecutar_query("UPDATE piscina SET estado='PAGADO' WHERE cliente=? AND estado='CREDITO'", (cli_pis_cobrar,), commit=True)
+                        st.rerun()
+                else:
+                    st.info("No hay cuentas pendientes de piscina.")
 
         # ---------------------------------------------------------------------
         # PESTAÑA 4: CONTROL DE CANCHAS (CORRECCIÓN DE TRADUCCIÓN Y BUSCADOR LIQUIDACIÓN)
@@ -1421,11 +1708,13 @@ else:
                     periodo = st.selectbox("Periodo", ["P.M.", "A.M."], index=0)
                 
                 horario_final_str = f"{hora_num}:00 {periodo}"
-                tipo_cancha_sel = st.selectbox("Tipo de Cancha", ["Cancha Grande", "Media Cancha"])
+                tipo_cancha_sel = st.selectbox("Tipo de Cancha", ["Cancha Mediana 1", "Cancha Mediana 2", "Cancha Grande"])
                 costo_base_cancha = precio_grande if tipo_cancha_sel == "Cancha Grande" else precio_media
                 
                 c_total = st.number_input("Monto Total Contractual (S/.)", min_value=0.0, value=float(costo_base_cancha))
                 c_adelanto = st.number_input("Monto de Adelanto (S/.)", min_value=0.0, value=0.0)
+                _, trabajador_cancha = seleccionar_trabajador("Trabajador que atendio", ("Trabajador",), "cancha_trabajador")
+                metodo_cancha, receptor_cancha, receptor_nombre_cancha = seleccionar_pago_receptor("cancha", incluir_mesero=False)
                 
                 if st.button("Guardar Reserva de Cancha", type="primary", use_container_width=True):
                     if not c_cliente.strip():
@@ -1434,25 +1723,36 @@ else:
                         fecha_str = c_fecha.strftime('%Y-%m-%d')
                         
                         # Validación de disponibilidad para evitar duplicados (compara usando el estado activo)
+                        if tipo_cancha_sel == "Cancha Mediana 1":
+                            tipos_bloqueantes = ["Cancha Grande", "Cancha Mediana 1"]
+                        elif tipo_cancha_sel == "Cancha Mediana 2":
+                            tipos_bloqueantes = ["Cancha Grande", "Cancha Mediana 2"]
+                        else:
+                            tipos_bloqueantes = ["Cancha Grande", "Cancha Mediana 1", "Cancha Mediana 2"]
+                        marcas = ",".join(["?"] * len(tipos_bloqueantes))
                         cruce_db = ejecutar_query(
-                            "SELECT id, cliente FROM cancha WHERE fecha_reserva = ? AND horario = ? AND tipo_cancha = ? AND estado IN ('PENDIENTE', 'PAGADO')",
-                            (fecha_str, horario_final_str, tipo_cancha_sel),
+                            f"SELECT id, cliente, tipo_cancha FROM cancha WHERE fecha_reserva = ? AND horario = ? AND tipo_cancha IN ({marcas}) AND estado IN ('PENDIENTE', 'PAGADO')",
+                            tuple([fecha_str, horario_final_str] + tipos_bloqueantes),
                             fetch=True
                         )
                         
                         if cruce_db:
-                            id_existente, cliente_existente = cruce_db[0]
-                            st.error(f"❌ Horario NO disponible. La {tipo_cancha_sel} ya está reservada para el {fecha_str} a las {horario_final_str} por el cliente: {cliente_existente} (ID: {id_existente}).")
+                            id_existente, cliente_existente, tipo_existente = cruce_db[0]
+                            st.error(f"Horario NO disponible. {tipo_existente} bloquea la reserva para el {fecha_str} a las {horario_final_str}. Cliente: {cliente_existente} (ID: {id_existente}).")
                         else:
                             ejecutar_query(
-                                "INSERT INTO cancha (cliente, fecha_reserva, horario, tipo_cancha, monto_total, adelanto, estado, estado_caja) VALUES (?,?,?,?,?,?,?, 'ABIERTO')",
-                                (c_cliente.strip().upper(), fecha_str, horario_final_str, tipo_cancha_sel, c_total, c_adelanto, "PENDIENTE"), 
+                                "INSERT INTO cancha (cliente, fecha_reserva, horario, tipo_cancha, monto_total, adelanto, estado, estado_caja, metodo_pago, receptor_tipo, receptor_nombre, trabajador) VALUES (?,?,?,?,?,?,?, 'ABIERTO', ?,?,?,?)",
+                                (c_cliente.strip().upper(), fecha_str, horario_final_str, tipo_cancha_sel, c_total, c_adelanto, "PENDIENTE", metodo_cancha, receptor_cancha, receptor_nombre_cancha, trabajador_cancha), 
                                 commit=True
                             )
+                            cancha_id = ejecutar_query("SELECT max(id) FROM cancha", fetch=True)[0][0]
+                            saldo_cancha = max(c_total - c_adelanto, 0)
+                            if saldo_cancha > 0:
+                                registrar_credito_cliente(c_cliente.strip().upper(), "Cancha", f"SALDO {tipo_cancha_sel}", 1, saldo_cancha, saldo_cancha, datetime.now().strftime('%Y-%m-%d %H:%M'), cancha_id)
                             st.success("¡Reserva guardada correctamente!")
                             if c_adelanto > 0:
                                 it_cancha = [{"producto": f"Adelanto Alquiler ({tipo_cancha_sel})", "cantidad": 1, "subtotal": c_adelanto}]
-                                mostrar_ticket_multiple(c_cliente.strip().upper(), it_cancha, c_adelanto, "ADELANTO ALQUILER")
+                                mostrar_ticket_multiple(c_cliente.strip().upper(), it_cancha, c_adelanto, "ADELANTO ALQUILER", trabajador_cancha)
                             else:
                                 st.rerun()
                         
@@ -1495,15 +1795,32 @@ else:
                         if check_reserva:
                             cliente_c, tot_c, ade_c = check_reserva[0]
                             restante = tot_c - ade_c
-                            ejecutar_query("UPDATE cancha SET estado='PAGADO', estado_caja='ABIERTO' WHERE id=?", (id_cancha_liquidar,), commit=True)
+                            ejecutar_query("UPDATE cancha SET estado='PAGADO', estado_caja='ABIERTO', metodo_pago=?, receptor_tipo=?, receptor_nombre=? WHERE id=?", (metodo_cancha, receptor_cancha, receptor_nombre_cancha, id_cancha_liquidar), commit=True)
+                            ejecutar_query("DELETE FROM detalle_creditos WHERE origen='Cancha' AND referencia_id=?", (id_cancha_liquidar,), commit=True)
+                            ejecutar_query("UPDATE ventas SET estado='PAGADO' WHERE origen='Cancha' AND cliente=? AND estado='CREDITO'", (cliente_c,), commit=True)
                             st.success(f"¡Reserva ID {id_cancha_liquidar} saldada por completo!")
                             it_liq = [{"producto": "Saldo Restante Cancha", "cantidad": 1, "subtotal": restante}]
-                            mostrar_ticket_multiple(cliente_c, it_liq, restante, "LIQUIDACIÓN CANCHA")
+                            mostrar_ticket_multiple(cliente_c, it_liq, restante, "LIQUIDACIÓN CANCHA", trabajador_cancha)
                         else:
                             st.error("El ID de reserva ingresado no existe en el sistema.")
 
             # --- COLUMNA 3: HISTORIAL MODIFICADO CON COLUMNA FECHA ---
             with col_c3:
+                st.subheader("Estado Visual de la Cancha")
+                fecha_visual = datetime.today().strftime("%Y-%m-%d")
+                reservas_hoy_visual = ejecutar_query(
+                    "SELECT tipo_cancha FROM cancha WHERE fecha_reserva=? AND estado IN ('PENDIENTE','PAGADO')",
+                    (fecha_visual,),
+                    fetch=True
+                )
+                reservadas_visual = {r[0] for r in reservas_hoy_visual} if reservas_hoy_visual else set()
+                cancha_html = "<div style='display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:14px;'>"
+                for nombre_cancha in ["Cancha Mediana 1", "Cancha Mediana 2"]:
+                    ocupada = nombre_cancha in reservadas_visual or "Cancha Grande" in reservadas_visual
+                    color = "rgba(220,38,38,.45)" if ocupada else "rgba(250,204,21,.45)"
+                    cancha_html += f"<div style='height:90px; border:2px solid #4b5563; background:{color}; display:flex; align-items:center; justify-content:center; font-weight:800;'>{nombre_cancha}</div>"
+                cancha_html += "</div>"
+                st.markdown(cancha_html, unsafe_allow_html=True)
                 st.subheader("Historial de Reservas")
                 
                 buscar_cliente = st.text_input("🔍 Buscar reserva por nombre de cliente:", placeholder="Escribe el nombre aquí...").strip().upper()
@@ -1518,6 +1835,12 @@ else:
                     
                     if not df_res.empty:
                         st.dataframe(df_res, use_container_width=True, hide_index=True)
+                        ids_reserva = {f"ID {r[0]} - {r[1]}": r[0] for r in reservas}
+                        reserva_eliminar = st.selectbox("Reserva a eliminar", list(ids_reserva.keys()), key="sb_eliminar_reserva_cancha")
+                        if st.button("Eliminar reserva", use_container_width=True, key="btn_eliminar_reserva_cancha"):
+                            ejecutar_query("UPDATE cancha SET estado='ELIMINADA' WHERE id=?", (ids_reserva[reserva_eliminar],), commit=True)
+                            ejecutar_query("DELETE FROM detalle_creditos WHERE origen='Cancha' AND referencia_id=?", (ids_reserva[reserva_eliminar],), commit=True)
+                            st.rerun()
                     else:
                         st.warning("No se encontraron reservas que coincidan con la búsqueda.")
                 else:
@@ -1541,12 +1864,14 @@ else:
             piscina_hoy = ejecutar_query("SELECT monto_pagado FROM piscina WHERE estado_caja='ABIERTO'", fetch=True)
             canchas_hoy = ejecutar_query("SELECT adelanto FROM cancha WHERE estado_caja='ABIERTO'", fetch=True)
             canchas_saldos_hoy = ejecutar_query("SELECT (monto_total - adelanto) FROM cancha WHERE estado='PAGADO' AND estado_caja='ABIERTO'", fetch=True)
+            local_hoy = ejecutar_query("SELECT monto_total FROM reservas_local WHERE estado='PAGADO' AND estado_caja='ABIERTO'", fetch=True)
             
             total_v = sum([v[0] for v in ventas_hoy])
             total_p = sum([p[0] for p in piscina_hoy])
             total_c = sum([c[0] for c in canchas_hoy]) + sum([cs[0] for cs in canchas_saldos_hoy])
+            total_l = sum([l[0] for l in local_hoy])
             
-            gran_total_caja = total_v + total_p + total_c
+            gran_total_caja = total_v + total_p + total_c + total_l
             
             cm1, cm2, cm3, cm4 = st.columns(4)
             with cm1: st.metric("🛒 Ventas de Productos", f"S/. {total_v:.2f}")
@@ -1554,6 +1879,22 @@ else:
             with cm3: st.metric("⚽ Ingresos Canchas", f"S/. {total_c:.2f}")
             with cm4: 
                 st.markdown(f"<div style='background-color:#1E6F5C; padding:10px; border-radius:10px; text-align:center;'><h3 style='color:white; margin:0;'>TOTAL EN CAJA</h3><h2 style='color:white; margin:0;'>S/. {gran_total_caja:.2f}</h2></div>", unsafe_allow_html=True)
+            st.metric("Reservacion de Local", f"S/. {total_l:.2f}")
+            with st.expander("Detalle de ingresos"):
+                detalle_ingresos = ejecutar_query(
+                    "SELECT 'Ventas' AS origen, cliente, total, metodo_pago, receptor_tipo, receptor_nombre, atendido_por_nombre FROM ventas WHERE estado='PAGADO' AND estado_caja='ABIERTO' AND COALESCE(estado_boleta,'ACTIVA')!='LIBERADA' UNION ALL SELECT 'Piscina', cliente, monto_pagado, metodo_pago, receptor_tipo, receptor_nombre, trabajador FROM piscina WHERE estado='PAGADO' AND estado_caja='ABIERTO' UNION ALL SELECT 'Cancha', cliente, adelanto, metodo_pago, receptor_tipo, receptor_nombre, trabajador FROM cancha WHERE estado_caja='ABIERTO' UNION ALL SELECT 'Reserva de Local', cliente, monto_total, metodo_pago, receptor_tipo, receptor_nombre, trabajador FROM reservas_local WHERE estado='PAGADO' AND estado_caja='ABIERTO'",
+                    fetch=True
+                )
+                if detalle_ingresos:
+                    st.dataframe(pd.DataFrame(detalle_ingresos, columns=["Origen", "Cliente", "Monto", "Metodo de pago", "Receptor", "Nombre receptor", "Atendido por"]), use_container_width=True, hide_index=True)
+            recaudacion_trab = ejecutar_query(
+                "SELECT trabajador, SUM(monto) FROM (SELECT COALESCE(atendido_por_nombre,'SIN ASIGNAR') trabajador, total monto FROM ventas WHERE estado='PAGADO' AND estado_caja='ABIERTO' UNION ALL SELECT COALESCE(trabajador,'SIN ASIGNAR'), monto_pagado FROM piscina WHERE estado='PAGADO' AND estado_caja='ABIERTO' UNION ALL SELECT COALESCE(trabajador,'SIN ASIGNAR'), adelanto FROM cancha WHERE estado_caja='ABIERTO' UNION ALL SELECT COALESCE(trabajador,'SIN ASIGNAR'), monto_total FROM reservas_local WHERE estado='PAGADO' AND estado_caja='ABIERTO') GROUP BY trabajador",
+                fetch=True
+            )
+            if recaudacion_trab:
+                st.markdown("### Recaudacion por Trabajador")
+                for trabajador, monto in recaudacion_trab:
+                    st.write(f"{trabajador or 'SIN ASIGNAR'} -> S/. {monto:.2f}")
             
             st.markdown("---")
             col_rc1, col_rc2 = st.columns([1, 1.2])
@@ -1579,11 +1920,13 @@ else:
                             ejecutar_query(f"UPDATE ventas SET estado_caja='CERRADO', id_cierre={id_cierre_actual} WHERE estado_caja='ABIERTO'", commit=True)
                             ejecutar_query(f"UPDATE cancha SET estado_caja='CERRADO', id_cierre={id_cierre_actual} WHERE estado_caja='ABIERTO'", commit=True)
                             ejecutar_query(f"UPDATE piscina SET estado_caja='CERRADO', id_cierre={id_cierre_actual} WHERE estado_caja='ABIERTO'", commit=True)
+                            ejecutar_query(f"UPDATE reservas_local SET estado_caja='CERRADO', id_cierre={id_cierre_actual} WHERE estado_caja='ABIERTO'", commit=True)
                         else:
                             # Respaldo de seguridad
                             ejecutar_query("UPDATE ventas SET estado_caja='CERRADO' WHERE estado_caja='ABIERTO'", commit=True)
                             ejecutar_query("UPDATE cancha SET estado_caja='CERRADO' WHERE estado_caja='ABIERTO'", commit=True)
                             ejecutar_query("UPDATE piscina SET estado_caja='CERRADO' WHERE estado_caja='ABIERTO'", commit=True)
+                            ejecutar_query("UPDATE reservas_local SET estado_caja='CERRADO' WHERE estado_caja='ABIERTO'", commit=True)
                         
                         st.success("¡Caja cerrada correctamente! El sistema se ha reiniciado para el siguiente turno.")
                         st.rerun()
@@ -1693,6 +2036,99 @@ else:
         # PESTAÑA 6: CONFIGURACION, MARCA, RESPALDOS Y SOPORTE
         # ---------------------------------------------------------------------
         elif modulo_actual == opciones_menu[5]:
+            col_t1, col_t2 = st.columns([1, 1.4])
+            with col_t1:
+                st.subheader("Registrar trabajador")
+                with st.form("form_trabajador", clear_on_submit=True):
+                    nombre_trab = st.text_input("Nombre completo").strip().upper()
+                    rol_trab = st.selectbox("Rol", ["Mesero", "Trabajador"])
+                    asistio = st.checkbox("Asistio Hoy", value=True)
+                    if st.form_submit_button("Guardar trabajador", type="primary", use_container_width=True):
+                        if nombre_trab:
+                            ejecutar_query(
+                                "INSERT OR REPLACE INTO trabajadores (nombre, rol, asistio_hoy, activo) VALUES (?,?,?,1)",
+                                (nombre_trab, rol_trab, "SI" if asistio else "NO"),
+                                commit=True
+                            )
+                            st.success("Trabajador guardado.")
+                            st.rerun()
+                        else:
+                            st.error("Ingrese el nombre del trabajador.")
+            with col_t2:
+                st.subheader("Control de asistencia")
+                trabajadores = ejecutar_query("SELECT id, nombre, rol, asistio_hoy FROM trabajadores WHERE activo=1 ORDER BY rol, nombre", fetch=True)
+                if trabajadores:
+                    df_trab = pd.DataFrame(trabajadores, columns=["ID", "Nombre", "Rol", "Asistio Hoy"])
+                    st.dataframe(df_trab, use_container_width=True, hide_index=True)
+                    st.markdown("### Actualizar / eliminar")
+                    ids_trab = {f"{t[1]} ({t[2]})": t[0] for t in trabajadores}
+                    elegido = st.selectbox("Trabajador", list(ids_trab.keys()), key="sb_trab_admin")
+                    col_a, col_b, col_c = st.columns(3)
+                    with col_a:
+                        if st.button("Asistio: SI", use_container_width=True):
+                            ejecutar_query("UPDATE trabajadores SET asistio_hoy='SI' WHERE id=?", (ids_trab[elegido],), commit=True)
+                            st.rerun()
+                    with col_b:
+                        if st.button("Asistio: NO", use_container_width=True):
+                            ejecutar_query("UPDATE trabajadores SET asistio_hoy='NO' WHERE id=?", (ids_trab[elegido],), commit=True)
+                            st.rerun()
+                    with col_c:
+                        if st.button("Eliminar", use_container_width=True):
+                            ejecutar_query("UPDATE trabajadores SET activo=0 WHERE id=?", (ids_trab[elegido],), commit=True)
+                            st.rerun()
+                else:
+                    st.info("Todavia no hay trabajadores registrados.")
+
+        elif modulo_actual == opciones_menu[6]:
+            tarifas_local_db = ejecutar_query("SELECT area, precio FROM tarifas_local", fetch=True)
+            tarifas_local = {a: p for a, p in tarifas_local_db} if tarifas_local_db else {}
+            col_l1, col_l2, col_l3 = st.columns([1.1, 1, 1.4])
+            with col_l1:
+                st.subheader("Nueva reservacion")
+                cliente_local = st.text_input("Cliente", key="txt_cliente_local").strip().upper()
+                area_local = st.selectbox("Area", ["Comedor Principal", "Comedor Piscina"], key="sb_area_local")
+                fecha_local = st.date_input("Fecha de reserva", value=datetime.today(), key="fecha_local")
+                horario_local = st.text_input("Horario", value="12:00 P.M.", key="hora_local")
+                monto_local = st.number_input("Monto total (S/.)", min_value=0.0, value=float(tarifas_local.get(area_local, 0.0)), step=5.0, key="monto_local")
+                trabajador_local_tipo, trabajador_local = seleccionar_trabajador("Atendido por", ("Trabajador",), "local_atendido")
+                metodo_local, receptor_local, receptor_nombre_local = seleccionar_pago_receptor("local", incluir_mesero=False)
+                if st.button("Guardar reserva de local", type="primary", use_container_width=True):
+                    if not cliente_local:
+                        st.error("Ingrese el cliente.")
+                    else:
+                        fecha_str = fecha_local.strftime("%Y-%m-%d")
+                        ejecutar_query(
+                            "INSERT INTO reservas_local (cliente, area, fecha_reserva, horario, monto_total, estado, metodo_pago, receptor_tipo, receptor_nombre, trabajador, estado_caja) VALUES (?,?,?,?,?,?,?,?,?,?, 'ABIERTO')",
+                            (cliente_local, area_local, fecha_str, horario_local, monto_local, "PAGADO", metodo_local, receptor_local, receptor_nombre_local, trabajador_local),
+                            commit=True
+                        )
+                        mostrar_ticket_multiple(cliente_local, [{"producto": f"RESERVA LOCAL - {area_local}", "cantidad": 1, "subtotal": monto_local}], monto_local, "RESERVA DE LOCAL", trabajador_local)
+            with col_l2:
+                st.subheader("Tarifas")
+                p_principal = st.number_input("Comedor Principal", min_value=0.0, value=float(tarifas_local.get("Comedor Principal", 0.0)), step=5.0)
+                p_piscina = st.number_input("Comedor Piscina", min_value=0.0, value=float(tarifas_local.get("Comedor Piscina", 0.0)), step=5.0)
+                if st.button("Actualizar tarifas de local", use_container_width=True):
+                    ejecutar_query("INSERT OR REPLACE INTO tarifas_local (area, precio) VALUES (?,?)", ("Comedor Principal", p_principal), commit=True)
+                    ejecutar_query("INSERT OR REPLACE INTO tarifas_local (area, precio) VALUES (?,?)", ("Comedor Piscina", p_piscina), commit=True)
+                    st.rerun()
+            with col_l3:
+                st.subheader("Historial")
+                reservas_local = ejecutar_query("SELECT id, cliente, area, fecha_reserva, horario, monto_total, estado FROM reservas_local ORDER BY id DESC", fetch=True)
+                if reservas_local:
+                    st.dataframe(pd.DataFrame(reservas_local, columns=["ID", "Cliente", "Area", "Fecha", "Horario", "Monto", "Estado"]), use_container_width=True, hide_index=True)
+                    ids_local = {f"ID {r[0]} - {r[1]} ({r[2]})": r[0] for r in reservas_local}
+                    reserva_sel = st.selectbox("Reserva a modificar/eliminar", list(ids_local.keys()))
+                    nuevo_cliente_local = st.text_input("Nuevo cliente", key="edit_cliente_local")
+                    if st.button("Modificar cliente", use_container_width=True) and nuevo_cliente_local.strip():
+                        ejecutar_query("UPDATE reservas_local SET cliente=? WHERE id=?", (nuevo_cliente_local.strip().upper(), ids_local[reserva_sel]), commit=True)
+                        st.rerun()
+                    if st.button("Eliminar reserva", use_container_width=True):
+                        ejecutar_query("UPDATE reservas_local SET estado='ELIMINADA' WHERE id=?", (ids_local[reserva_sel],), commit=True)
+                        st.rerun()
+                else:
+                    st.info("No hay reservaciones de local.")
+
+        elif modulo_actual == opciones_menu[7]:
             st.caption("Administra identidad visual, respaldo de datos y canales de soporte.")
 
             col_cfg1, col_cfg2 = st.columns([1, 1])
@@ -1732,8 +2168,11 @@ else:
                 st.subheader("Copia de seguridad")
                 st.write("Genera una copia completa del archivo SQLite del sistema.")
                 if st.button("Crear copia de seguridad ahora", type="primary", use_container_width=True):
-                    backup_creado = crear_backup_base_datos()
-                    st.success(f"Copia creada: {backup_creado.name}")
+                    backup_creado, excel_creado = crear_backup_base_datos()
+                    mensaje_backup = f"Copia creada: {backup_creado.name}"
+                    if excel_creado:
+                        mensaje_backup += f" | Excel: {excel_creado.name}"
+                    st.success(mensaje_backup)
 
                 backups = sorted(BACKUP_DIR.glob("*.db"), reverse=True)
                 if backups:
@@ -1777,6 +2216,36 @@ else:
         if st.sidebar.button("Cerrar Sesión", type="secondary", use_container_width=True):
             logout()
         st.title("👨‍🍳 Monitor de Cocina - LAS MARÍAS")
+        try:
+            st.autorefresh(interval=60000, key="refresh_cocina")
+        except Exception:
+            pass
+
+        produccion_dia = ejecutar_query(
+            "SELECT plato, SUM(cantidad) FROM cocina WHERE date(fecha_hora)=date('now','localtime') GROUP BY plato ORDER BY SUM(cantidad) DESC",
+            fetch=True
+        )
+        if produccion_dia:
+            st.subheader("Resumen de Produccion del Dia")
+            cols_prod = st.columns(min(4, len(produccion_dia)))
+            for idx, (plato_prod, cant_prod) in enumerate(produccion_dia):
+                cols_prod[idx % len(cols_prod)].metric(plato_prod, int(cant_prod or 0))
+
+        mods_pendientes = ejecutar_query(
+            "SELECT cliente, plato, cantidad, modificado_en FROM cocina WHERE estado='PENDIENTE' AND modificado_en IS NOT NULL ORDER BY modificado_en DESC LIMIT 1",
+            fetch=True
+        )
+        if mods_pendientes:
+            cli_mod, plato_mod, cant_mod, hora_mod = mods_pendientes[0]
+            st.markdown(
+                f"""
+                <div style='position:sticky; top:0; z-index:20; background:#7f1d1d; color:white; padding:22px; border-radius:8px; margin-bottom:16px; text-align:center;'>
+                    <h2 style='margin:0;'>PEDIDO MODIFICADO</h2>
+                    <p style='font-size:20px; margin:8px 0 0 0;'>Cliente: {cli_mod} | {plato_mod} x {cant_mod} | Hora: {hora_mod}</p>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
         
         # Consultamos todos los platos pendientes
         pedidos_cocina = ejecutar_query("SELECT id, cliente, plato, cantidad, fecha_hora FROM cocina WHERE estado='PENDIENTE' ORDER BY fecha_hora ASC", fetch=True)
@@ -1793,15 +2262,29 @@ else:
             
             # Mostramos los pedidos agrupados con el diseño ajustado
             for (cliente_p, fecha_h), data in pedidos_agrupados.items():
+                try:
+                    minutos_espera = int((datetime.now() - datetime.strptime(fecha_h, '%Y-%m-%d %H:%M')).total_seconds() // 60)
+                except Exception:
+                    minutos_espera = 0
+                if minutos_espera <= 15:
+                    color_tiempo = "#16a34a"
+                    alerta_tiempo = ""
+                elif minutos_espera <= 20:
+                    color_tiempo = "#f97316"
+                    alerta_tiempo = ""
+                else:
+                    color_tiempo = "#dc2626"
+                    alerta_tiempo = "<div style='font-size:22px; font-weight:900; margin-top:10px;'>PEDIDO FUERA DE TIEMPO</div>"
                 with st.container():
                     st.markdown(f"""
-                    <div style='background-color: #262730; padding: 20px; border-radius: 10px; border-left: 5px solid #FF4B4B; margin-bottom: 15px;'>
+                    <div style='background-color: #262730; padding: 20px; border-radius: 10px; border-left: 8px solid {color_tiempo}; margin-bottom: 15px;'>
                         <p style='margin: 0 0 12px 0; color: #FF4B4B; font-size: 26px; font-weight: bold;'>
                             🍴 {", ".join(data['items'])}
                         </p>
                         <p style='margin: 0; color: #FFFFFF; font-size: 18px; font-weight: 500;'>
-                            👤 Cliente: {cliente_p}
+                            👤 Cliente: {cliente_p} | Tiempo: {minutos_espera} min
                         </p>
+                        {alerta_tiempo}
                     </div>
                     """, unsafe_allow_html=True)
                     
