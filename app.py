@@ -181,6 +181,19 @@ def asegurar_estructura_db():
     cursor.execute("INSERT OR IGNORE INTO tarifas_cancha VALUES ('Cancha Mediana 2', 40.0)")
     cursor.execute("INSERT OR IGNORE INTO tarifas_local VALUES ('Comedor Principal', 0.0)")
     cursor.execute("INSERT OR IGNORE INTO tarifas_local VALUES ('Comedor Piscina', 0.0)")
+
+    # Consolidar cabeceras de credito heredadas para evitar cuentas duplicadas por modulo.
+    cursor.execute("SELECT cliente, MIN(id), SUM(total) FROM ventas WHERE estado='CREDITO' GROUP BY cliente HAVING COUNT(*) > 1")
+    creditos_duplicados = cursor.fetchall()
+    for cliente_dup, id_conservar, total_consolidado in creditos_duplicados:
+        cursor.execute(
+            "UPDATE ventas SET total=?, origen='Cuenta Corriente' WHERE id=?",
+            (total_consolidado or 0, id_conservar)
+        )
+        cursor.execute(
+            "DELETE FROM ventas WHERE cliente=? AND estado='CREDITO' AND id<>?",
+            (cliente_dup, id_conservar)
+        )
     
     conn.commit()
     conn.close()
@@ -210,9 +223,9 @@ def trabajadores_por_rol(roles=("Mesero", "Trabajador")):
 
 def seleccionar_trabajador(label, roles=("Mesero", "Trabajador"), key_prefix="trab"):
     personas = trabajadores_por_rol(roles)
-    opciones = ["SIN ASIGNAR"] + [f"{nombre} ({rol})" for nombre, rol in personas]
+    opciones = ["Ventanilla"] + [f"{nombre} ({rol})" for nombre, rol in personas]
     elegido = st.selectbox(label, opciones, key=f"{key_prefix}_selector")
-    if elegido == "SIN ASIGNAR":
+    if elegido == "Ventanilla":
         return "", ""
     nombre = elegido.rsplit(" (", 1)[0]
     rol = elegido.rsplit("(", 1)[1].replace(")", "")
@@ -241,8 +254,8 @@ def html_ticket_impresion(cliente, items, total, tipo, vendedor=""):
     for item in items:
         filas += f"<tr><td>{item['cantidad']} x {item['producto']}</td><td style='text-align:right'>S/. {float(item['subtotal']):.2f}</td></tr>"
     return f"""
-    <html><body onload="setTimeout(function(){{window.print();}}, 250);">
-    <div style="font-family:Courier New,monospace;width:280px;color:#000;background:#fff;padding:8px;">
+    <html><body onload="setTimeout(function(){{window.print();}}, 250);" style="margin:0; background:#fff; display:flex; justify-content:center;">
+    <div style="font-family:Courier New,monospace;width:280px;color:#000;background:#fff;padding:8px;margin:0 auto;">
       <div style="text-align:center;font-weight:bold;">NOTA DE VENTA - LAS MARIAS<br>RC. LAS MARIAS</div>
       <hr>
       <div style="font-size:12px;">FECHA: {fecha_ticket}<br>CLIENTE: {cliente}<br>{'VENDEDOR: ' + vendedor + '<br>' if vendedor else ''}OP: {tipo}</div>
@@ -270,17 +283,17 @@ def encolar_impresion_nota(cliente, items, total, tipo, vendedor=""):
 def registrar_credito_cliente(cliente, origen, producto, cantidad, precio_unitario, subtotal, fecha, referencia_id=None):
     cliente_normalizado = cliente.strip().upper() if cliente and cliente.strip() else "GENERAL"
     existente = ejecutar_query(
-        "SELECT id, total FROM ventas WHERE cliente=? AND estado='CREDITO' AND origen=?",
-        (cliente_normalizado, origen),
+        "SELECT id, total FROM ventas WHERE cliente=? AND estado='CREDITO' ORDER BY id ASC LIMIT 1",
+        (cliente_normalizado,),
         fetch=True
     )
     if existente:
         id_venta, total_actual = existente[0]
-        ejecutar_query("UPDATE ventas SET total=? WHERE id=?", ((total_actual or 0) + subtotal, id_venta), commit=True)
+        ejecutar_query("UPDATE ventas SET total=?, origen='Cuenta Corriente' WHERE id=?", ((total_actual or 0) + subtotal, id_venta), commit=True)
     else:
         ejecutar_query(
             "INSERT INTO ventas (cliente, total, estado, fecha, estado_caja, origen) VALUES (?,?,?,?, 'ABIERTO', ?)",
-            (cliente_normalizado, subtotal, "CREDITO", fecha, origen),
+            (cliente_normalizado, subtotal, "CREDITO", fecha, "Cuenta Corriente"),
             commit=True
         )
     ejecutar_query(
@@ -918,13 +931,18 @@ def aplicar_estilos_sistema():
         }
 
         [data-testid="stSidebar"] div[role="radiogroup"] label[data-baseweb="radio"]:nth-of-type(7) {
-            margin-top: 30px;
+            position: relative;
+            margin-top: 38px;
         }
 
         [data-testid="stSidebar"] div[role="radiogroup"] label[data-baseweb="radio"]:nth-of-type(7)::before {
             content: "Ajustes";
             display: block;
-            margin: -34px 0 10px 0;
+            position: absolute;
+            top: -31px;
+            left: 0;
+            right: 0;
+            margin: 0;
             padding: 0;
             color: #ffffff !important;
             font-size: 1.17em;
@@ -1169,8 +1187,10 @@ def login():
             <h2 class="login-card-title">Inicio de sesión</h2>
             <p class="login-card-subtitle">Ingresa con tu usuario para continuar</p>
             """, unsafe_allow_html=True)
-            username = st.text_input("Usuario")
-            password = st.text_input("Contraseña", type="password")
+            with st.form("login_form"):
+                username = st.text_input("Usuario")
+                password = st.text_input("Contraseña", type="password")
+                login_submit = st.form_submit_button("Ingresar", use_container_width=True)
             components.html(
                 """
                 <script>
@@ -1178,8 +1198,7 @@ def login():
                     const doc = window.parent.document;
                     const user = Array.from(doc.querySelectorAll('input')).find(input => input.getAttribute('aria-label') === 'Usuario');
                     const pass = Array.from(doc.querySelectorAll('input')).find(input => input.getAttribute('aria-label') === 'Contraseña');
-                    const loginBtn = Array.from(doc.querySelectorAll('button')).find(btn => btn.innerText.trim() === 'Ingresar');
-                    if (!user || !pass || !loginBtn) {
+                    if (!user || !pass) {
                         setTimeout(bindLoginEnter, 250);
                         return;
                     }
@@ -1193,25 +1212,13 @@ def login():
                             }
                         }, true);
                     }
-                    if (!pass.dataset.lmEnterBound) {
-                        pass.dataset.lmEnterBound = "1";
-                        pass.addEventListener("keydown", function(event) {
-                            if (event.key === "Enter" && !pass.dataset.lmSubmitting) {
-                                event.preventDefault();
-                                event.stopPropagation();
-                                pass.dataset.lmSubmitting = "1";
-                                loginBtn.click();
-                                setTimeout(() => { pass.dataset.lmSubmitting = ""; }, 1200);
-                            }
-                        }, true);
-                    }
                 })();
                 </script>
                 """,
                 height=0,
                 scrolling=False
             )
-            if st.button("Ingresar", use_container_width=True):
+            if login_submit:
                 user_data = ejecutar_query("SELECT rol FROM usuarios WHERE username=? AND password=?", (username, password), fetch=True)
                 if user_data:
                     token = secrets.token_urlsafe(32)
@@ -1554,13 +1561,13 @@ else:
                                         id_venta_existente, total_antiguo = existe_cabecera[0]
                                         nuevo_total_maestro = total_antiguo + total_carrito
                                         ejecutar_query(
-                                            "UPDATE ventas SET total=?, atendido_por_tipo=?, atendido_por_nombre=?, metodo_pago=?, receptor_tipo=?, receptor_nombre=?, origen='Ventas' WHERE id=?",
+                                            "UPDATE ventas SET total=?, atendido_por_tipo=?, atendido_por_nombre=?, metodo_pago=?, receptor_tipo=?, receptor_nombre=?, origen='Cuenta Corriente' WHERE id=?",
                                             (nuevo_total_maestro, atendido_tipo, atendido_nombre, metodo_pago_venta, receptor_tipo_venta, receptor_nombre_venta, id_venta_existente),
                                             commit=True
                                         )
                                     else:
                                         ejecutar_query(
-                                            "INSERT INTO ventas (cliente, total, estado, fecha, estado_caja, atendido_por_tipo, atendido_por_nombre, metodo_pago, receptor_tipo, receptor_nombre, origen) VALUES (?,?,?,?, 'ABIERTO', ?,?,?,?,?, 'Ventas')",
+                                            "INSERT INTO ventas (cliente, total, estado, fecha, estado_caja, atendido_por_tipo, atendido_por_nombre, metodo_pago, receptor_tipo, receptor_nombre, origen) VALUES (?,?,?,?, 'ABIERTO', ?,?,?,?,?, 'Cuenta Corriente')",
                                             (cliente_final, total_carrito, "CREDITO", fecha_actual, atendido_tipo, atendido_nombre, metodo_pago_venta, receptor_tipo_venta, receptor_nombre_venta),
                                             commit=True
                                         )
@@ -2029,7 +2036,17 @@ else:
                 
                 c_total = st.number_input("Monto Total Contractual (S/.)", min_value=0.0, value=float(costo_base_cancha))
                 c_adelanto = st.number_input("Monto de Adelanto (S/.)", min_value=0.0, value=0.0)
+                if c_adelanto > c_total:
+                    st.warning("El adelanto no puede ser mayor al monto total contractual.")
                 destino_cancha = st.radio("Destino de la Venta", ["Pagado al Instante", "Llevar a Cuenta Credito"], horizontal=True, key="destino_cancha")
+                cliente_credito_cancha = c_cliente.strip().upper()
+                if destino_cancha == "Llevar a Cuenta Credito":
+                    clientes_credito_cancha = ejecutar_query("SELECT DISTINCT cliente FROM ventas WHERE estado='CREDITO' ORDER BY cliente", fetch=True) or []
+                    opciones_credito_cancha = ["Usar cliente escrito"] + [c[0] for c in clientes_credito_cancha]
+                    credito_cancha_sel = st.selectbox("Cuenta credito existente", opciones_credito_cancha, key="sb_credito_existente_cancha")
+                    if credito_cancha_sel != "Usar cliente escrito":
+                        cliente_credito_cancha = credito_cancha_sel
+                        st.caption(f"Se agregara a la cuenta corriente de: {cliente_credito_cancha}")
                 _, trabajador_cancha = seleccionar_trabajador("Trabajador que atendio", ("Trabajador",), "cancha_trabajador")
                 metodo_cancha, receptor_cancha, receptor_nombre_cancha = seleccionar_pago_receptor(
                     "cancha",
@@ -2038,7 +2055,8 @@ else:
                 )
                 
                 if st.button("Guardar Reserva de Cancha", type="primary", use_container_width=True):
-                    if not c_cliente.strip():
+                    cliente_cancha_guardar = cliente_credito_cancha.strip().upper()
+                    if not cliente_cancha_guardar:
                         st.error("Por favor, ingresa el nombre del cliente.")
                     else:
                         fecha_str = c_fecha.strftime('%Y-%m-%d')
@@ -2060,22 +2078,24 @@ else:
                         if cruce_db:
                             id_existente, cliente_existente, tipo_existente = cruce_db[0]
                             st.error(f"Horario NO disponible. {tipo_existente} bloquea la reserva para el {fecha_str} a las {horario_final_str}. Cliente: {cliente_existente} (ID: {id_existente}).")
+                        elif c_adelanto > c_total:
+                            st.error("No se guardó la reserva porque el adelanto supera el monto total.")
                         else:
                             adelanto_guardar = c_total if destino_cancha == "Pagado al Instante" else c_adelanto
-                            estado_guardar = "PAGADO" if destino_cancha == "Pagado al Instante" else "PENDIENTE"
+                            saldo_cancha = max(c_total - adelanto_guardar, 0)
+                            estado_guardar = "PAGADO" if saldo_cancha <= 0 else "PENDIENTE"
                             ejecutar_query(
                                 "INSERT INTO cancha (cliente, fecha_reserva, horario, tipo_cancha, monto_total, adelanto, estado, estado_caja, metodo_pago, receptor_tipo, receptor_nombre, trabajador) VALUES (?,?,?,?,?,?,?, 'ABIERTO', ?,?,?,?)",
-                                (c_cliente.strip().upper(), fecha_str, horario_final_str, tipo_cancha_sel, c_total, adelanto_guardar, estado_guardar, metodo_cancha, receptor_cancha, receptor_nombre_cancha, trabajador_cancha), 
+                                (cliente_cancha_guardar, fecha_str, horario_final_str, tipo_cancha_sel, c_total, adelanto_guardar, estado_guardar, metodo_cancha, receptor_cancha, receptor_nombre_cancha, trabajador_cancha), 
                                 commit=True
                             )
                             cancha_id = ejecutar_query("SELECT max(id) FROM cancha", fetch=True)[0][0]
-                            saldo_cancha = max(c_total - adelanto_guardar, 0)
                             if destino_cancha == "Llevar a Cuenta Credito" and saldo_cancha > 0:
-                                registrar_credito_cliente(c_cliente.strip().upper(), "Cancha", f"SALDO {tipo_cancha_sel}", 1, saldo_cancha, saldo_cancha, datetime.now().strftime('%Y-%m-%d %H:%M'), cancha_id)
+                                registrar_credito_cliente(cliente_cancha_guardar, "Cancha", f"SALDO {tipo_cancha_sel}", 1, saldo_cancha, saldo_cancha, datetime.now().strftime('%Y-%m-%d %H:%M'), cancha_id)
                             st.success("¡Reserva guardada correctamente!")
                             if adelanto_guardar > 0:
                                 it_cancha = [{"producto": f"Alquiler ({tipo_cancha_sel})", "cantidad": 1, "subtotal": adelanto_guardar}]
-                                encolar_impresion_nota(c_cliente.strip().upper(), it_cancha, adelanto_guardar, "ALQUILER CANCHA", trabajador_cancha)
+                                encolar_impresion_nota(cliente_cancha_guardar, it_cancha, adelanto_guardar, "ALQUILER CANCHA", trabajador_cancha)
                                 st.rerun()
                             else:
                                 st.rerun()
@@ -2121,7 +2141,11 @@ else:
                             restante = tot_c - ade_c
                             ejecutar_query("UPDATE cancha SET estado='PAGADO', estado_caja='ABIERTO', metodo_pago=?, receptor_tipo=?, receptor_nombre=? WHERE id=?", (metodo_cancha, receptor_cancha, receptor_nombre_cancha, id_cancha_liquidar), commit=True)
                             ejecutar_query("DELETE FROM detalle_creditos WHERE origen='Cancha' AND referencia_id=?", (id_cancha_liquidar,), commit=True)
-                            ejecutar_query("UPDATE ventas SET estado='PAGADO' WHERE origen='Cancha' AND cliente=? AND estado='CREDITO'", (cliente_c,), commit=True)
+                            deuda_restante_cliente = ejecutar_query("SELECT SUM(subtotal) FROM detalle_creditos WHERE cliente=?", (cliente_c,), fetch=True)[0][0] or 0
+                            if deuda_restante_cliente > 0:
+                                ejecutar_query("UPDATE ventas SET total=?, estado='CREDITO' WHERE cliente=? AND estado='CREDITO'", (deuda_restante_cliente, cliente_c), commit=True)
+                            else:
+                                ejecutar_query("UPDATE ventas SET total=0, estado='PAGADO' WHERE cliente=? AND estado='CREDITO'", (cliente_c,), commit=True)
                             st.success(f"¡Reserva ID {id_cancha_liquidar} saldada por completo!")
                             it_liq = [{"producto": "Saldo Restante Cancha", "cantidad": 1, "subtotal": restante}]
                             encolar_impresion_nota(cliente_c, it_liq, restante, "LIQUIDACION CANCHA", trabajador_cancha)
@@ -2218,19 +2242,19 @@ else:
                 st.markdown(f"<div style='background-color:#1E6F5C; padding:10px; border-radius:10px; text-align:center;'><h3 style='color:white; margin:0;'>TOTAL EN CAJA</h3><h2 style='color:white; margin:0;'>S/. {gran_total_caja:.2f}</h2></div>", unsafe_allow_html=True)
             with st.expander("Detalle de ingresos"):
                 detalle_ingresos = ejecutar_query(
-                    "SELECT 'Ventas' AS origen, cliente, total, metodo_pago, receptor_tipo, receptor_nombre, atendido_por_nombre FROM ventas WHERE estado='PAGADO' AND estado_caja='ABIERTO' AND COALESCE(estado_boleta,'ACTIVA')!='LIBERADA' UNION ALL SELECT 'Piscina', cliente, monto_pagado, metodo_pago, receptor_tipo, receptor_nombre, trabajador FROM piscina WHERE estado='PAGADO' AND estado_caja='ABIERTO' UNION ALL SELECT 'Cancha', cliente, adelanto, metodo_pago, receptor_tipo, receptor_nombre, trabajador FROM cancha WHERE estado_caja='ABIERTO' UNION ALL SELECT 'Reserva de Local', cliente, monto_total, metodo_pago, receptor_tipo, receptor_nombre, trabajador FROM reservas_local WHERE estado='PAGADO' AND estado_caja='ABIERTO'",
+                    "SELECT 'Ventas' AS origen, cliente, total, metodo_pago, receptor_tipo, COALESCE(NULLIF(TRIM(atendido_por_nombre),''),'Ventanilla') FROM ventas WHERE estado='PAGADO' AND estado_caja='ABIERTO' AND COALESCE(estado_boleta,'ACTIVA')!='LIBERADA' UNION ALL SELECT 'Piscina', cliente, monto_pagado, metodo_pago, receptor_tipo, COALESCE(NULLIF(TRIM(trabajador),''),'Ventanilla') FROM piscina WHERE estado='PAGADO' AND estado_caja='ABIERTO' UNION ALL SELECT 'Cancha', cliente, adelanto, metodo_pago, receptor_tipo, COALESCE(NULLIF(TRIM(trabajador),''),'Ventanilla') FROM cancha WHERE estado_caja='ABIERTO' UNION ALL SELECT 'Reserva de Local', cliente, monto_total, metodo_pago, receptor_tipo, COALESCE(NULLIF(TRIM(trabajador),''),'Ventanilla') FROM reservas_local WHERE estado='PAGADO' AND estado_caja='ABIERTO'",
                     fetch=True
                 )
                 if detalle_ingresos:
-                    st.dataframe(pd.DataFrame(detalle_ingresos, columns=["Origen", "Cliente", "Monto", "Metodo de pago", "Receptor", "Nombre receptor", "Atendido por"]), use_container_width=True, hide_index=True)
+                    st.dataframe(pd.DataFrame(detalle_ingresos, columns=["Origen", "Cliente", "Monto", "Metodo de pago", "Receptor", "Atendido por"]), use_container_width=True, hide_index=True)
             recaudacion_trab = ejecutar_query(
-                "SELECT trabajador, SUM(monto) FROM (SELECT COALESCE(atendido_por_nombre,'SIN ASIGNAR') trabajador, total monto FROM ventas WHERE estado='PAGADO' AND estado_caja='ABIERTO' UNION ALL SELECT COALESCE(trabajador,'SIN ASIGNAR'), monto_pagado FROM piscina WHERE estado='PAGADO' AND estado_caja='ABIERTO' UNION ALL SELECT COALESCE(trabajador,'SIN ASIGNAR'), adelanto FROM cancha WHERE estado_caja='ABIERTO' UNION ALL SELECT COALESCE(trabajador,'SIN ASIGNAR'), monto_total FROM reservas_local WHERE estado='PAGADO' AND estado_caja='ABIERTO') GROUP BY trabajador",
+                "SELECT trabajador, SUM(monto) FROM (SELECT COALESCE(NULLIF(TRIM(atendido_por_nombre),''),'Ventanilla') trabajador, total monto FROM ventas WHERE estado='PAGADO' AND estado_caja='ABIERTO' UNION ALL SELECT COALESCE(NULLIF(TRIM(trabajador),''),'Ventanilla'), monto_pagado FROM piscina WHERE estado='PAGADO' AND estado_caja='ABIERTO' UNION ALL SELECT COALESCE(NULLIF(TRIM(trabajador),''),'Ventanilla'), adelanto FROM cancha WHERE estado_caja='ABIERTO' UNION ALL SELECT COALESCE(NULLIF(TRIM(trabajador),''),'Ventanilla'), monto_total FROM reservas_local WHERE estado='PAGADO' AND estado_caja='ABIERTO') GROUP BY trabajador ORDER BY CASE WHEN trabajador='Ventanilla' THEN 1 ELSE 0 END, trabajador",
                 fetch=True
             )
             if recaudacion_trab:
                 st.markdown("### Recaudacion por Trabajador")
                 for trabajador, monto in recaudacion_trab:
-                    st.write(f"{trabajador or 'SIN ASIGNAR'} -> S/. {monto:.2f}")
+                    st.write(f"{trabajador or 'Ventanilla'} -> S/. {monto:.2f}")
             
             st.markdown("---")
             col_rc1, col_rc2 = st.columns([1, 1.2])
