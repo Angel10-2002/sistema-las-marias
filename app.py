@@ -882,6 +882,11 @@ def aplicar_estilos_sistema():
             display: none;
         }
 
+        [data-testid="collapsedControl"],
+        [data-testid="stSidebarCollapseButton"] {
+            display: none !important;
+        }
+
         .block-container {
             padding-top: 1rem;
             padding-bottom: 3rem;
