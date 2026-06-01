@@ -12,7 +12,7 @@ from pathlib import Path
 import streamlit.components.v1 as components
 
 # Configuración de página
-st.set_page_config(page_title="Complejo Recreativo Las Marías", layout="wide", page_icon="🏊‍♂️")
+st.set_page_config(page_title="Complejo Recreativo Las Marías", layout="wide", page_icon="🏊‍♂️", initial_sidebar_state="expanded")
 
 DB_NAME = "complejo.db"
 BASE_DIR = Path(__file__).resolve().parent
@@ -896,6 +896,9 @@ def aplicar_estilos_sistema():
         [data-testid="stSidebar"] {
             background: #222b35;
             border-right: 1px solid rgba(255, 255, 255, 0.08);
+            display: block !important;
+            visibility: visible !important;
+            transform: none !important;
         }
 
         [data-testid="stSidebar"] * {
@@ -1206,6 +1209,56 @@ def aplicar_estilos_sistema():
         }
     </style>
     """, unsafe_allow_html=True)
+    components.html(
+        """
+        <script>
+        (function keepSidebarOpen() {
+            const doc = window.parent.document;
+            try {
+                Object.keys(window.parent.localStorage || {}).forEach(function(key) {
+                    if (key.toLowerCase().includes("sidebar")) {
+                        window.parent.localStorage.removeItem(key);
+                    }
+                });
+            } catch (error) {}
+
+            let tries = 0;
+            const timer = setInterval(function() {
+                tries += 1;
+                const sidebar = doc.querySelector('[data-testid="stSidebar"]');
+                const isHidden = !sidebar || sidebar.getBoundingClientRect().width < 80;
+                const openButton =
+                    doc.querySelector('[data-testid="collapsedControl"]') ||
+                    doc.querySelector('button[aria-label="Open sidebar"]') ||
+                    doc.querySelector('button[aria-label="Expand sidebar"]') ||
+                    Array.from(doc.querySelectorAll("button")).find(function(button) {
+                        return /open sidebar|expand sidebar|mostrar sidebar|abrir sidebar/i.test(button.getAttribute("aria-label") || button.title || button.textContent || "");
+                    });
+
+                if (isHidden && openButton) {
+                    openButton.click();
+                }
+                if (!isHidden || tries > 30) {
+                    clearInterval(timer);
+                }
+            }, 100);
+            if (window.parent.__lmSidebarObserver) {
+                window.parent.__lmSidebarObserver.disconnect();
+            }
+            window.parent.__lmSidebarObserver = new MutationObserver(function() {
+                const sidebar = doc.querySelector('[data-testid="stSidebar"]');
+                const openButton = doc.querySelector('[data-testid="collapsedControl"]');
+                if ((!sidebar || sidebar.getBoundingClientRect().width < 80) && openButton) {
+                    openButton.click();
+                }
+            });
+            window.parent.__lmSidebarObserver.observe(doc.body, { childList: true, subtree: true, attributes: true });
+        })();
+        </script>
+        """,
+        height=0,
+        scrolling=False
+    )
 
 def login():
     aplicar_estilos_login()
