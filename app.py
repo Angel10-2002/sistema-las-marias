@@ -263,6 +263,19 @@ def mesero_cocina_sql(alias="c"):
         )
     """
 
+def calcular_tiempo_entrega(fecha_pedido, fecha_entrega):
+    try:
+        inicio = datetime.strptime(str(fecha_pedido), "%Y-%m-%d %H:%M")
+        fin = datetime.strptime(str(fecha_entrega), "%Y-%m-%d %H:%M")
+        segundos = max(0, int((fin - inicio).total_seconds()))
+        minutos, resto = divmod(segundos, 60)
+        if minutos >= 60:
+            horas, mins = divmod(minutos, 60)
+            return f"{horas}h {mins}min"
+        return f"{minutos}min {resto:02d}s"
+    except Exception:
+        return "Sin dato"
+
 def html_ticket_impresion(cliente, items, total, tipo, vendedor=""):
     fecha_ticket = datetime.now().strftime('%d/%m/%Y %H:%M')
     filas = ""
@@ -657,7 +670,7 @@ def detalle_ingreso_caja(origen, registro_id, monto):
             return cliente, f"{fecha_reserva} {horario}", [(f"Reserva de local - {area}", 1, total or monto, total or monto)], total or monto
     return "", "", [], monto
 
-@st.fragment(run_every="3s")
+@st.fragment(run_every="1s")
 def render_panel_cocina_tiempo_real():
     st.markdown(
         """
@@ -691,8 +704,8 @@ def render_panel_cocina_tiempo_real():
             color: #fff;
         }
         @keyframes cocinaBlink {
-            0%, 100% { filter: brightness(1); box-shadow: 0 0 0 rgba(220,38,38,0); }
-            50% { filter: brightness(1.18); box-shadow: 0 0 0 6px rgba(220,38,38,.22); }
+            0%, 100% { background-color:#dc2626; box-shadow:0 0 0 rgba(255,255,255,0); border-color:#dc2626; }
+            50% { background-color:#b91c1c; box-shadow:0 0 0 6px rgba(255,255,255,.75); border-color:#ffffff; }
         }
         </style>
         """,
@@ -751,29 +764,30 @@ def render_panel_cocina_tiempo_real():
     for (cliente_p, fecha_h, mesero_p), data in pedidos_agrupados.items():
         try:
             inicio_dt = datetime.strptime(fecha_h, '%Y-%m-%d %H:%M')
-            segundos_espera = int((datetime.now() - inicio_dt).total_seconds())
+            ahora_servidor = datetime.now()
+            segundos_espera = int((ahora_servidor - inicio_dt).total_seconds())
             inicio_ms = int(inicio_dt.timestamp() * 1000)
+            server_now_ms = int(ahora_servidor.timestamp() * 1000)
         except Exception:
             segundos_espera = 0
             inicio_ms = int(datetime.now().timestamp() * 1000)
-        minutos_espera = segundos_espera // 60
-        color_tiempo = "#16a34a" if minutos_espera < 15 else "#f97316" if minutos_espera < 20 else "#dc2626"
-        alerta_tiempo = "<div class='late-alert'>PEDIDO FUERA DE TIEMPO</div>" if minutos_espera >= 20 else ""
+            server_now_ms = int(datetime.now().timestamp() * 1000)
+        color_tiempo = "#16a34a" if segundos_espera < 600 else "#f97316" if segundos_espera < 900 else "#dc2626"
+        alerta_tiempo = "<div class='late-alert'>PEDIDO FUERA DE TIEMPO</div>" if segundos_espera >= 900 else ""
         card_id = "cook_" + "_".join(str(x) for x in data["ids"])
-        animacion_roja = "animation:cocinaBlink 1s infinite;" if minutos_espera >= 20 else ""
+        animacion_roja = "animation:cocinaBlink 1s infinite;" if segundos_espera >= 900 else ""
         components.html(f"""
         <style>
         @keyframes cocinaBlink {{
-            0%, 100% {{ filter: brightness(1); box-shadow: 0 0 0 rgba(220,38,38,0); }}
-            50% {{ filter: brightness(1.18); box-shadow: 0 0 0 6px rgba(220,38,38,.22); }}
+            0%, 100% {{ background-color:#dc2626; box-shadow:0 0 0 rgba(255,255,255,0); border-color:#dc2626; }}
+            50% {{ background-color:#b91c1c; box-shadow:0 0 0 6px rgba(255,255,255,.75); border-color:#ffffff; }}
         }}
         </style>
-        <div id="{card_id}" class="cook-card" data-start-ms="{inicio_ms}" style="background-color:{color_tiempo}; padding:20px; border-radius:10px; margin-bottom:15px; color:white; display:grid; grid-template-columns:1fr 140px; gap:14px; align-items:center; {animacion_roja}">
+        <div id="{card_id}" class="cook-card" data-start-ms="{inicio_ms}" data-server-now-ms="{server_now_ms}" data-client-render-ms="" style="background-color:{color_tiempo}; padding:20px; border:3px solid transparent; border-radius:10px; margin-bottom:15px; color:white; display:grid; grid-template-columns:1fr 140px; gap:14px; align-items:center; {animacion_roja}">
             <div>
                 <p style='margin:0 0 6px 0; color:white; font-size:18px; font-weight:900;'>Pedido #{", #".join(str(x) for x in data["ids"])}</p>
                 <p style='margin:0 0 12px 0; color:white; font-size:26px; font-weight:bold;'>🍴 {", ".join(data['items'])}</p>
-                <p style='margin:0; color:white; font-size:18px; font-weight:500;'>👤 Cliente: {cliente_p}</p>
-                <p style='margin:6px 0 0 0; color:white; font-size:20px; font-weight:900;'>Mesero: {mesero_p}</p>
+                <p style='margin:0; color:white; font-size:18px; font-weight:700;'>👤 Cliente: {cliente_p} &nbsp; | &nbsp; Mesero: {mesero_p}</p>
                 {alerta_tiempo}
             </div>
             <div style='background:rgba(0,0,0,.22); border:1px solid rgba(255,255,255,.45); border-radius:8px; padding:12px; text-align:center;'>
@@ -787,12 +801,14 @@ def render_panel_cocina_tiempo_real():
             const card = document.getElementById("{card_id}");
             if (!card) return;
             const startMs = Number(card.dataset.startMs);
+            const serverNowMs = Number(card.dataset.serverNowMs);
+            const clientRenderMs = Date.now();
             const main = card.querySelector(".timer-main");
             const sub = card.querySelector(".timer-sub");
-            const late = card.querySelector(".late-alert");
             function pad(n) {{ return String(n).padStart(2, "0"); }}
             function tick() {{
-                const elapsed = Math.max(0, Math.floor((Date.now() - startMs) / 1000));
+                const syncedNowMs = serverNowMs + (Date.now() - clientRenderMs);
+                const elapsed = Math.max(0, Math.floor((syncedNowMs - startMs) / 1000));
                 const mins = Math.floor(elapsed / 60);
                 const remaining = Math.max(900 - elapsed, 0);
                 if (remaining > 0) {{
@@ -802,20 +818,24 @@ def render_panel_cocina_tiempo_real():
                     main.textContent = "+" + pad(Math.floor(lateSecs / 60)) + ":" + pad(lateSecs % 60);
                 }}
                 sub.textContent = mins + " min transcurridos";
-                const color = mins < 15 ? "#16a34a" : mins < 20 ? "#f97316" : "#dc2626";
+                const vencido = elapsed >= 900;
+                const color = elapsed < 600 ? "#16a34a" : elapsed < 900 ? "#f97316" : "#dc2626";
                 card.style.backgroundColor = color;
-                card.style.animation = mins >= 20 ? "cocinaBlink 1s infinite" : "none";
-                if (mins >= 20 && !late) {{
+                card.style.animation = vencido ? "cocinaBlink 1s infinite" : "none";
+                let late = card.querySelector(".late-alert");
+                if (vencido && !late) {{
                     const div = document.createElement("div");
                     div.className = "late-alert";
                     div.style.cssText = "font-size:22px;font-weight:900;margin-top:10px;";
                     div.textContent = "PEDIDO FUERA DE TIEMPO";
                     card.firstElementChild.appendChild(div);
+                }} else if (!vencido && late) {{
+                    late.remove();
                 }}
             }}
             tick();
             if (card._timer) clearInterval(card._timer);
-            card._timer = setInterval(tick, 1000);
+            card._timer = setInterval(tick, 500);
         }})();
         </script>
         """, height=150, scrolling=False)
@@ -828,11 +848,60 @@ def render_panel_cocina_tiempo_real():
                     ejecutar_query("UPDATE cocina SET estado='ENTREGADO', fecha_entrega=? WHERE id=?", (fecha_entrega, id_individual), commit=True)
                 st.rerun()
 
+@st.fragment(run_every="1s")
+def render_monitor_cocina_admin_tabla():
+    mesero_pend_sql = mesero_cocina_sql("c")
+    pendientes = ejecutar_query(
+        f"SELECT c.id, c.cliente, c.plato, c.cantidad, c.fecha_hora, {mesero_pend_sql} AS mesero FROM cocina c WHERE c.estado='PENDIENTE' ORDER BY c.id ASC",
+        fetch=True
+    )
+    if not pendientes:
+        st.success("Cocina al día.")
+        return
+
+    df_pend = pd.DataFrame(
+        pendientes,
+        columns=["ID Pedido", "Cliente / Mesa", "Plato", "Cantidad", "Fecha/Hora", "Mesero"]
+    )
+    ahora_servidor = datetime.now()
+    parpadeo_rojo = ahora_servidor.second % 2 == 0
+
+    def estilo_id_pedido(fila):
+        estilos = [""] * len(fila)
+        try:
+            inicio = datetime.strptime(str(fila["Fecha/Hora"]), "%Y-%m-%d %H:%M")
+            segundos = int((ahora_servidor - inicio).total_seconds())
+        except Exception:
+            segundos = 0
+        if segundos < 600:
+            color = "#16a34a"
+        elif segundos < 900:
+            color = "#f97316"
+            texto = "white"
+        else:
+            color = "#dc2626" if parpadeo_rojo else "#b91c1c"
+            texto = "white"
+        if segundos < 600:
+            texto = "white"
+        borde = "2px solid #ffffff" if segundos >= 900 and not parpadeo_rojo else "1px solid #dc2626"
+        estilos[0] = f"background-color: {color}; color: {texto}; font-weight: 900; border: {borde};"
+        return estilos
+
+    st.dataframe(df_pend.style.apply(estilo_id_pedido, axis=1), use_container_width=True, hide_index=True)
+
 def render_modificar_notas(dict_productos):
     if st.button("Modificar Pedido / Boleta", type="primary", use_container_width=True, key="btn_abrir_modificar_boleta"):
         st.session_state["modal_modificar_boleta"] = True
+        st.session_state["boleta_modificada_pendiente"] = False
+        st.session_state["confirmar_cierre_boleta"] = False
 
     def contenido_editor_boleta():
+        def separador_editor():
+            st.markdown(
+                "<div style='height:3px;background:#cbd5e1;margin:26px 0 22px 0;border-radius:3px;'></div>",
+                unsafe_allow_html=True
+            )
+
         ventas_editables = ejecutar_query(
             "SELECT id, cliente, total, estado, fecha FROM ventas WHERE estado IN ('PAGADO','CREDITO') AND COALESCE(estado_boleta,'ACTIVA')='ACTIVA' ORDER BY id DESC LIMIT 80",
             fetch=True
@@ -841,6 +910,7 @@ def render_modificar_notas(dict_productos):
             st.info("No hay notas activas para modificar.")
             return
 
+        st.markdown("#### Boleta o pedido")
         opciones_ventas = {f"Nota #{v[0]} - {v[1]} - S/. {v[2]:.2f} ({v[3]}) - {v[4]}": v[0] for v in ventas_editables}
         venta_label = st.selectbox("Boleta o pedido", list(opciones_ventas.keys()), key="sb_editar_nota_venta")
         venta_editar_id = opciones_ventas[venta_label]
@@ -854,27 +924,31 @@ def render_modificar_notas(dict_productos):
         filtro_sql = "cliente=?" if tabla_det == "detalle_creditos" else "venta_id=?"
         filtro_val = cliente_actual_nota if tabla_det == "detalle_creditos" else venta_editar_id
 
+        meseros_activos = [nombre for nombre, rol in trabajadores_por_rol(("Mesero",))]
+        opciones_mesero = ["Sin asignar"] + meseros_activos
+        if mesero_actual and mesero_actual not in opciones_mesero:
+            opciones_mesero.append(mesero_actual)
+        mesero_index = opciones_mesero.index(mesero_actual) if mesero_actual in opciones_mesero else 0
+
         col_a, col_b = st.columns(2)
         with col_a:
             nuevo_cliente_nota = st.text_input("Cliente / mesa", value=cliente_actual_nota, key="txt_cliente_edit_nota").strip().upper()
-            nuevo_mesero = st.text_input("Mesero asociado", value=mesero_actual, key="txt_mesero_edit_nota").strip()
+            mesero_seleccionado = st.selectbox("Mesero asociado", opciones_mesero, index=mesero_index, key="sb_mesero_edit_nota")
+            nuevo_mesero = "" if mesero_seleccionado == "Sin asignar" else mesero_seleccionado
         with col_b:
             metodo_index = METODOS_PAGO.index(metodo_actual) if metodo_actual in METODOS_PAGO else 0
             nuevo_metodo = st.selectbox("Método de pago", METODOS_PAGO, index=metodo_index, key="sb_metodo_edit_nota")
             nuevas_obs = st.text_area("Observaciones", value=obs_actual, height=82, key="txt_obs_edit_nota")
 
-        if st.button("Guardar datos generales", use_container_width=True, key="btn_guardar_datos_generales_nota"):
-            cliente_trabajo = sincronizar_cliente_nota(venta_editar_id, cliente_actual_nota, nuevo_cliente_nota, estado_actual_nota)
-            responsable_pago = nombre_responsable_pago(nuevo_metodo, "Metodo de pago", "")
-            ejecutar_query(
-                "UPDATE ventas SET cliente=?, atendido_por_tipo=?, atendido_por_nombre=?, metodo_pago=?, receptor_tipo='Metodo de pago', receptor_nombre=?, observaciones=? WHERE id=?",
-                (cliente_trabajo, "Mesero" if nuevo_mesero else "", nuevo_mesero, nuevo_metodo, responsable_pago, nuevas_obs.strip(), venta_editar_id),
-                commit=True
-            )
-            ejecutar_query("UPDATE cocina SET mesero_nombre=?, modificado_en=? WHERE cliente=? AND estado='PENDIENTE'", (nuevo_mesero, datetime.now().strftime('%Y-%m-%d %H:%M'), cliente_trabajo), commit=True)
-            ejecutar_query("UPDATE detalle_creditos SET mesero_nombre=? WHERE cliente=?", (nuevo_mesero, cliente_trabajo), commit=True)
-            st.success("Datos generales actualizados.")
-            st.rerun()
+        datos_generales_modificados = (
+            nuevo_cliente_nota != (cliente_actual_nota or "").strip().upper() or
+            nuevo_mesero != (mesero_actual or "").strip() or
+            nuevo_metodo != (metodo_actual or "Efectivo") or
+            nuevas_obs.strip() != (obs_actual or "").strip()
+        )
+
+        separador_editor()
+        st.markdown("#### Producto a editar")
 
         detalles_nota = ejecutar_query(f"SELECT id, producto, cantidad, precio_unitario, subtotal FROM {tabla_det} WHERE {filtro_sql}", (filtro_val,), fetch=True) or []
         if detalles_nota:
@@ -891,6 +965,7 @@ def render_modificar_notas(dict_productos):
                     ejecutar_query("UPDATE cocina SET cantidad=?, mesero_nombre=?, modificado_en=? WHERE cliente=? AND plato=? AND estado='PENDIENTE'", (nueva_cant_item, nuevo_mesero, datetime.now().strftime('%Y-%m-%d %H:%M'), cliente_trabajo, producto_det), commit=True)
                     nuevo_total = recalcular_credito_cliente(cliente_trabajo) if tabla_det == "detalle_creditos" else (ejecutar_query("SELECT SUM(subtotal) FROM detalle_ventas WHERE venta_id=?", (venta_editar_id,), fetch=True)[0][0] or 0)
                     ejecutar_query("UPDATE ventas SET cliente=?, total=? WHERE id=?", (cliente_trabajo, nuevo_total, venta_editar_id), commit=True)
+                    st.session_state["boleta_modificada_pendiente"] = True
                     st.rerun()
             with col_d:
                 st.write("")
@@ -901,10 +976,12 @@ def render_modificar_notas(dict_productos):
                     ejecutar_query("DELETE FROM cocina WHERE cliente=? AND plato=? AND estado='PENDIENTE'", (cliente_trabajo, producto_det), commit=True)
                     nuevo_total = recalcular_credito_cliente(cliente_trabajo) if tabla_det == "detalle_creditos" else (ejecutar_query("SELECT SUM(subtotal) FROM detalle_ventas WHERE venta_id=?", (venta_editar_id,), fetch=True)[0][0] or 0)
                     ejecutar_query("UPDATE ventas SET cliente=?, total=? WHERE id=?", (cliente_trabajo, nuevo_total, venta_editar_id), commit=True)
+                    st.session_state["boleta_modificada_pendiente"] = True
                     st.rerun()
         else:
             st.info("Esta boleta no tiene productos registrados.")
 
+        separador_editor()
         if dict_productos:
             st.markdown("#### Agregar consumo")
             col_e, col_f = st.columns([2, 1])
@@ -926,24 +1003,87 @@ def render_modificar_notas(dict_productos):
                 ejecutar_query("UPDATE ventas SET cliente=?, total=? WHERE id=?", (cliente_trabajo, nuevo_total, venta_editar_id), commit=True)
                 if str(dict_productos[prod_extra]["proveedor"]).strip().upper() == "INTERNO":
                     ejecutar_query("INSERT INTO cocina (cliente, plato, cantidad, fecha_hora, estado, modificado_en, mesero_nombre) VALUES (?,?,?,?,?,?,?)", (cliente_trabajo, prod_extra, cant_extra, fecha_actual, "PENDIENTE", fecha_actual, nuevo_mesero), commit=True)
+                st.session_state["boleta_modificada_pendiente"] = True
                 st.rerun()
 
+        separador_editor()
         col_g, col_h = st.columns(2)
         with col_g:
-            if st.button("Reutilizar / liberar boleta", use_container_width=True, key="btn_liberar_boleta"):
-                detalles_guardar = ejecutar_query("SELECT producto, cantidad, subtotal FROM detalle_ventas WHERE venta_id=?", (venta_editar_id,), fetch=True) or []
-                total_original = ejecutar_query("SELECT total FROM ventas WHERE id=?", (venta_editar_id,), fetch=True)[0][0] or 0
+            if st.button("Guardar Modificación", type="primary", use_container_width=True, key="btn_guardar_modificacion_boleta"):
+                cliente_trabajo = sincronizar_cliente_nota(venta_editar_id, cliente_actual_nota, nuevo_cliente_nota, estado_actual_nota)
+                responsable_pago = nombre_responsable_pago(nuevo_metodo, "Metodo de pago", "")
+                nuevo_total = recalcular_credito_cliente(cliente_trabajo) if tabla_det == "detalle_creditos" else (ejecutar_query("SELECT SUM(subtotal) FROM detalle_ventas WHERE venta_id=?", (venta_editar_id,), fetch=True)[0][0] or 0)
                 ejecutar_query(
-                    "INSERT INTO boletas_liberadas (venta_id, cliente, total, items, fecha_liberacion, estado) VALUES (?,?,?,?,?, 'LIBERADA')",
-                    (venta_editar_id, cliente_actual_nota, total_original, str(detalles_guardar), datetime.now().strftime('%Y-%m-%d %H:%M')),
+                    "UPDATE ventas SET cliente=?, total=?, atendido_por_tipo=?, atendido_por_nombre=?, metodo_pago=?, receptor_tipo='Metodo de pago', receptor_nombre=?, observaciones=? WHERE id=?",
+                    (cliente_trabajo, nuevo_total, "Mesero" if nuevo_mesero else "", nuevo_mesero, nuevo_metodo, responsable_pago, nuevas_obs.strip(), venta_editar_id),
                     commit=True
                 )
-                ejecutar_query("UPDATE ventas SET estado_boleta='LIBERADA', estado='LIBERADA', total=0 WHERE id=?", (venta_editar_id,), commit=True)
+                ejecutar_query("UPDATE cocina SET mesero_nombre=?, modificado_en=? WHERE cliente=? AND estado='PENDIENTE'", (nuevo_mesero, datetime.now().strftime('%Y-%m-%d %H:%M'), cliente_trabajo), commit=True)
+                ejecutar_query("UPDATE detalle_creditos SET mesero_nombre=? WHERE cliente=?", (nuevo_mesero, cliente_trabajo), commit=True)
+                if tabla_det == "detalle_creditos":
+                    detalles_impresion = ejecutar_query("SELECT producto, cantidad, subtotal FROM detalle_creditos WHERE cliente=?", (cliente_trabajo,), fetch=True) or []
+                else:
+                    detalles_impresion = ejecutar_query("SELECT producto, cantidad, subtotal FROM detalle_ventas WHERE venta_id=?", (venta_editar_id,), fetch=True) or []
+                items_impresion = [{"producto": prod, "cantidad": cant, "subtotal": subtotal} for prod, cant, subtotal in detalles_impresion]
+                encolar_impresion_nota(cliente_trabajo, items_impresion, nuevo_total, "NOTA ACTUALIZADA", nuevo_mesero)
+                st.session_state["boleta_modificada_pendiente"] = False
+                st.session_state["confirmar_cierre_boleta"] = False
+                st.session_state["modal_modificar_boleta"] = False
                 st.rerun()
         with col_h:
             if st.button("Cerrar", use_container_width=True, key="btn_cerrar_modal_boleta"):
-                st.session_state["modal_modificar_boleta"] = False
+                if st.session_state.get("boleta_modificada_pendiente") or datos_generales_modificados:
+                    st.session_state["confirmar_cierre_boleta"] = True
+                else:
+                    st.session_state["modal_modificar_boleta"] = False
                 st.rerun()
+
+        if st.session_state.get("confirmar_cierre_boleta"):
+            st.markdown(
+                """
+                <style>
+                .st-key-confirmar_cierre_overlay {
+                    position: fixed;
+                    inset: 0;
+                    z-index: 999999;
+                    background: rgba(15, 23, 42, .55);
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    padding: 18px;
+                }
+                .st-key-confirmar_cierre_overlay > div {
+                    width: min(520px, 92vw);
+                    background: #ffffff;
+                    border: 2px solid #f59e0b;
+                    border-radius: 8px;
+                    padding: 18px;
+                    box-shadow: 0 22px 60px rgba(15, 23, 42, .35);
+                }
+                .confirm-title {
+                    color: #92400e;
+                    font-weight: 900;
+                    font-size: 18px;
+                    text-align: center;
+                    margin: 0 0 14px 0;
+                }
+                </style>
+                """,
+                unsafe_allow_html=True
+            )
+            with st.container(key="confirmar_cierre_overlay"):
+                st.markdown("<div class='confirm-title'>QUIERES CERRAR Y PERDER LAS MODIFICACIONES</div>", unsafe_allow_html=True)
+                col_cancelar, col_cerrar = st.columns(2)
+                with col_cancelar:
+                    if st.button("CANCELAR", use_container_width=True, key="btn_cancelar_cierre_boleta"):
+                        st.session_state["confirmar_cierre_boleta"] = False
+                        st.rerun()
+                with col_cerrar:
+                    if st.button("CERRAR", use_container_width=True, key="btn_confirmar_cierre_boleta"):
+                        st.session_state["boleta_modificada_pendiente"] = False
+                        st.session_state["confirmar_cierre_boleta"] = False
+                        st.session_state["modal_modificar_boleta"] = False
+                        st.rerun()
 
     if st.session_state.get("modal_modificar_boleta"):
         if hasattr(st, "dialog"):
@@ -1013,6 +1153,11 @@ preparar_directorios_sistema()
 # --- INICIALIZAR CARRITO TEMPORAL ---
 if 'carrito' not in st.session_state:
     st.session_state['carrito'] = []
+if "venta_form_nonce" not in st.session_state:
+    st.session_state["venta_form_nonce"] = 0
+
+def limpiar_formulario_venta():
+    st.session_state["venta_form_nonce"] += 1
 
 # --- MODAL DE IMPRESIÓN REFORMATEADO Y OPTIMIZADO PARA IMPRESORA TÉRMICA ---
 @st.dialog("📄 Boleto de Venta - LAS MARÍAS")
@@ -1905,9 +2050,9 @@ else:
                 
                 st.markdown("---")
                 st.subheader("👨‍🍳 Monitor de Cocina (Platos Pendientes)")
-                render_panel_cocina_tiempo_real()
+                render_monitor_cocina_admin_tabla()
                 render_modificar_notas(dict_productos)
-                if False and pendientes:
+                if False:
                     df_pend = pd.DataFrame(pendientes, columns=["ID Pedido", "Cliente / Mesa", "Plato", "Cantidad", "Fecha/Hora"])
                     st.dataframe(df_pend, use_container_width=True, hide_index=True)
                     
@@ -2002,6 +2147,13 @@ else:
                             historial_cocina,
                             columns=["ID Pedido", "Cliente / Mesa", "Plato", "Cantidad", "Mesero", "Hora de entrega", "Hora de pedido"]
                         )
+                        df_hist_cocina["Tiempo de entrega"] = df_hist_cocina.apply(
+                            lambda fila: calcular_tiempo_entrega(fila["Hora de pedido"], fila["Hora de entrega"]),
+                            axis=1
+                        )
+                        df_hist_cocina = df_hist_cocina[
+                            ["ID Pedido", "Cliente / Mesa", "Plato", "Cantidad", "Mesero", "Tiempo de entrega", "Hora de entrega", "Hora de pedido"]
+                        ]
                         st.dataframe(df_hist_cocina, use_container_width=True, hide_index=True)
                     else:
                         st.info("Aún no hay platos entregados para mostrar.")
@@ -2030,13 +2182,15 @@ else:
                         cliente_final = cliente_elegido_combo.strip().upper()
                         st.info(f"Se añadirán los productos a la cuenta corriente de: **{cliente_final}**")
                 else:
-                    cliente_input = st.text_input("Nombre del Cliente / Mesa:", value="General", key="txt_cliente_mostrador")
+                    venta_form_nonce = st.session_state["venta_form_nonce"]
+                    cliente_input = st.text_input("Nombre del Cliente / Mesa:", value="", key=f"txt_cliente_mostrador_{venta_form_nonce}")
                     cliente_final = cliente_input.strip().upper() if cliente_input.strip() else "GENERAL"
 
                 st.markdown("### Atendido por")
-                atendido_tipo, atendido_nombre = seleccionar_trabajador("Mesero o Trabajador", ("Mesero", "Trabajador"), "venta_atendido")
+                venta_form_nonce = st.session_state["venta_form_nonce"]
+                atendido_tipo, atendido_nombre = seleccionar_trabajador("Mesero o Trabajador", ("Mesero", "Trabajador"), f"venta_atendido_{venta_form_nonce}")
                 metodo_pago_venta, receptor_tipo_venta, receptor_nombre_venta = seleccionar_pago_receptor(
-                    "venta",
+                    f"venta_{venta_form_nonce}",
                     incluir_mesero=True,
                     receptor_preseleccionado={"tipo": atendido_tipo, "nombre": atendido_nombre}
                 )
@@ -2104,6 +2258,7 @@ else:
                                     
                                     st.success(f"¡Cargado con éxito al crédito de {cliente_final}!")
                                     st.session_state['carrito'] = []
+                                    limpiar_formulario_venta()
                                     st.rerun()
                                 
                                 # C. Si es pago al instante (CONTROLADO LOCALMENTE)
@@ -2124,6 +2279,7 @@ else:
                                     encolar_impresion_nota(cliente_final, list(st.session_state['carrito']), total_carrito, "VENTA EN MOSTRADOR", atendido_nombre)
                                     
                                     st.session_state['carrito'] = []
+                                    limpiar_formulario_venta()
                                     st.rerun()
                 else:
                     st.info("La lista está vacía. Añade productos desde el panel izquierdo.")
@@ -3227,6 +3383,13 @@ else:
                     historial_cocina,
                     columns=["ID Pedido", "Cliente / Mesa", "Plato", "Cantidad", "Mesero", "Hora de entrega", "Hora de pedido"]
                 )
+                df_hist_cocina["Tiempo de entrega"] = df_hist_cocina.apply(
+                    lambda fila: calcular_tiempo_entrega(fila["Hora de pedido"], fila["Hora de entrega"]),
+                    axis=1
+                )
+                df_hist_cocina = df_hist_cocina[
+                    ["ID Pedido", "Cliente / Mesa", "Plato", "Cantidad", "Mesero", "Tiempo de entrega", "Hora de entrega", "Hora de pedido"]
+                ]
                 st.dataframe(df_hist_cocina, use_container_width=True, hide_index=True)
             else:
                 st.info("Aún no hay platos entregados para mostrar.")
