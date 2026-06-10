@@ -879,11 +879,11 @@ def render_monitor_cocina_admin_tabla():
             color = "#f97316"
             texto = "white"
         else:
-            color = "#dc2626" if parpadeo_rojo else "#b91c1c"
-            texto = "white"
+            color = "#dc2626" if parpadeo_rojo else "#ffffff"
+            texto = "white" if parpadeo_rojo else "#dc2626"
         if segundos < 600:
             texto = "white"
-        borde = "2px solid #ffffff" if segundos >= 900 and not parpadeo_rojo else "1px solid #dc2626"
+        borde = "2px solid #dc2626" if segundos >= 900 and not parpadeo_rojo else "1px solid #dc2626"
         estilos[0] = f"background-color: {color}; color: {texto}; font-weight: 900; border: {borde};"
         return estilos
 
