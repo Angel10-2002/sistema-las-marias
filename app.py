@@ -2621,16 +2621,24 @@ else:
                         with col_ed1:
                             nuevo_nombre = st.text_input("Editar Nombre", value=nom_edit)
                             nuevo_prov = st.text_input("Editar Proveedor", value=prov_edit)
-                            col_stock_actual, col_stock_add, col_stock_sub = st.columns(3)
-                            with col_stock_actual:
-                                st.number_input("Stock Actual", min_value=0, value=int(stock_edit), disabled=True)
-                            with col_stock_add:
-                                stock_a_sumar = st.number_input("Añadir Stock", min_value=0, value=0, step=1)
-                            with col_stock_sub:
-                                stock_a_restar = st.number_input("Disminuir Stock", min_value=0, value=0, step=1)
                         with col_ed2:
                             nuevo_costo_val = st.number_input("Editar Costo (S/.)", min_value=0.0, value=float(cost_edit), step=0.5)
                             nuevo_precio_val = st.number_input("Editar Precio Venta (S/.)", min_value=0.0, value=float(prec_edit), step=0.5)
+
+                        st.markdown("##### Movimiento de stock")
+                        col_stock_actual, col_stock_add, col_stock_sub = st.columns(3)
+                        with col_stock_actual:
+                            st.number_input("Stock Actual", min_value=0, value=int(stock_edit), disabled=True, key=f"stock_actual_{id_edit}")
+                        with col_stock_add:
+                            stock_a_sumar = st.number_input("Añadir Stock", min_value=0, value=0, step=1, key=f"stock_add_{id_edit}")
+                        with col_stock_sub:
+                            stock_a_restar = st.number_input("Disminuir Stock", min_value=0, value=0, step=1, key=f"stock_sub_{id_edit}")
+
+                        stock_preview = int(stock_edit) + int(stock_a_sumar) - int(stock_a_restar)
+                        if stock_preview < 0:
+                            st.warning("La disminución supera el stock disponible.")
+                        else:
+                            st.caption(f"Stock final al guardar: {stock_preview}")
                         
                         col_btn1, col_btn2 = st.columns(2)
                         with col_btn1:
