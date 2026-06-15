@@ -2742,7 +2742,13 @@ else:
                 calculo_sugerido = (ninos * p_nino) + (adultos * p_adulto) + (mayores * p_mayor)
                 st.warning(f"Pago Sugerido: S/. {calculo_sugerido:.2f}")
                 
-                monto_final = st.number_input("Monto Final Recibido", min_value=0.0, value=float(calculo_sugerido), step=1.0, key=f"monto_final_piscina_{piscina_nonce}")
+                monto_final = st.number_input(
+                    "Monto Final Recibido",
+                    min_value=0.0,
+                    value=float(calculo_sugerido),
+                    step=1.0,
+                    key=f"monto_final_piscina_{piscina_nonce}_{ninos}_{adultos}_{mayores}_{calculo_sugerido:.2f}"
+                )
                 monto_mayor_al_sugerido = monto_final > calculo_sugerido
                 if monto_mayor_al_sugerido:
                     st.warning("El monto final no puede ser mayor al pago sugerido. Ajusta el importe para continuar.")
