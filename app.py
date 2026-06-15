@@ -3117,13 +3117,86 @@ else:
                         detalle_ingresos,
                         columns=["Origen", "ID", "Cliente", "Fecha/Hora", "Monto", "Método de pago"]
                     )
-                    buscar_metodo = st.text_input("Buscar por método de pago", placeholder="Ejemplo: Yape José Luis, PLIN o Efectivo", key="txt_buscar_metodo_caja").strip().upper()
+                    buscar_metodo = st.text_input(
+                        "Buscar por método de pago o cliente",
+                        placeholder="Ejemplo: Yape José Luis, PLIN, Efectivo o nombre del cliente",
+                        key="txt_buscar_metodo_caja"
+                    ).strip().upper()
                     if buscar_metodo:
                         metodo_busqueda = df_detalle_ingresos["Método de pago"].fillna("").astype(str).str.upper()
-                        df_detalle_ingresos = df_detalle_ingresos[metodo_busqueda.str.contains(buscar_metodo, regex=False)]
+                        cliente_busqueda = df_detalle_ingresos["Cliente"].fillna("").astype(str).str.upper()
+                        df_detalle_ingresos = df_detalle_ingresos[
+                            metodo_busqueda.str.contains(buscar_metodo, regex=False) |
+                            cliente_busqueda.str.contains(buscar_metodo, regex=False)
+                        ]
                     if not df_detalle_ingresos.empty:
-                        df_detalle_vista = df_detalle_ingresos.drop(columns=["ID"])
-                        st.dataframe(formatear_montos_df(df_detalle_vista, ["Monto"]), use_container_width=True, hide_index=True)
+                        st.markdown("#### Ingresos encontrados")
+                        st.markdown(
+                            """
+                            <style>
+                            .ingreso-row-head, .ingreso-row {
+                                display: grid;
+                                grid-template-columns: 1.05fr .65fr 1.25fr 1.25fr .75fr 1fr 1.15fr;
+                                gap: 8px;
+                                align-items: center;
+                            }
+                            .ingreso-row-head {
+                                margin-bottom: 6px;
+                                color: #5f7780;
+                                font-size: 12px;
+                                font-weight: 900;
+                            }
+                            .ingreso-cell {
+                                min-height: 34px;
+                                padding: 7px 8px;
+                                border: 1px solid #d9e3ea;
+                                background: #ffffff;
+                                border-radius: 6px;
+                                font-size: 12px;
+                                overflow-wrap: anywhere;
+                            }
+                            </style>
+                            <div class="ingreso-row-head">
+                                <div>Origen</div><div>ID</div><div>Cliente</div><div>Fecha/Hora</div><div>Monto</div><div>Método</div><div>Acción</div>
+                            </div>
+                            """,
+                            unsafe_allow_html=True
+                        )
+                        for idx, row in df_detalle_ingresos.reset_index(drop=True).iterrows():
+                            cols_ingreso = st.columns([1.05, .65, 1.25, 1.25, .75, 1, 1.15])
+                            with cols_ingreso[0]:
+                                st.markdown(f"<div class='ingreso-cell'>{row['Origen']}</div>", unsafe_allow_html=True)
+                            with cols_ingreso[1]:
+                                st.markdown(f"<div class='ingreso-cell'>{int(row['ID'])}</div>", unsafe_allow_html=True)
+                            with cols_ingreso[2]:
+                                st.markdown(f"<div class='ingreso-cell'>{row['Cliente']}</div>", unsafe_allow_html=True)
+                            with cols_ingreso[3]:
+                                st.markdown(f"<div class='ingreso-cell'>{row['Fecha/Hora']}</div>", unsafe_allow_html=True)
+                            with cols_ingreso[4]:
+                                st.markdown(f"<div class='ingreso-cell'>S/. {float(row['Monto'] or 0):.2f}</div>", unsafe_allow_html=True)
+                            with cols_ingreso[5]:
+                                st.markdown(f"<div class='ingreso-cell'>{row['Método de pago']}</div>", unsafe_allow_html=True)
+                            with cols_ingreso[6]:
+                                if st.button("IMPRIMIR NOTA DE VENTA", use_container_width=True, key=f"btn_reimprimir_ingreso_{row['Origen']}_{row['ID']}_{idx}"):
+                                    cliente_imp, fecha_imp, items_imp, total_imp = detalle_ingreso_caja(
+                                        row["Origen"],
+                                        int(row["ID"]),
+                                        float(row["Monto"] or 0)
+                                    )
+                                    items_ticket = [
+                                        {"producto": item[0], "cantidad": item[1], "subtotal": float(item[3] or 0)}
+                                        for item in items_imp
+                                    ]
+                                    if not items_ticket:
+                                        items_ticket = [{"producto": row["Origen"], "cantidad": 1, "subtotal": float(row["Monto"] or 0)}]
+                                    encolar_impresion_nota(
+                                        cliente_imp or row["Cliente"],
+                                        items_ticket,
+                                        float(total_imp or row["Monto"] or 0),
+                                        f"REIMPRESION - {row['Origen']}",
+                                        ""
+                                    )
+                                    st.rerun()
                         opciones_detalle = {}
                         for idx, row in df_detalle_ingresos.reset_index(drop=True).iterrows():
                             etiqueta_detalle = f"{row['Origen']} | {row['Cliente']} | {row['Fecha/Hora']} | S/. {float(row['Monto'] or 0):.2f} | {row['Método de pago']}"
@@ -3144,7 +3217,7 @@ else:
                             st.info("No se encontraron artículos detallados para este ingreso.")
                         st.metric("Total del ingreso", f"S/. {float(total_det or 0):.2f}")
                     else:
-                        st.info("No hay ingresos que coincidan con el método buscado.")
+                        st.info("No hay ingresos que coincidan con el método de pago o cliente buscado.")
                 else:
                     st.info("No hay ingresos registrados en la caja abierta.")
             recaudacion_trab = ejecutar_query(
