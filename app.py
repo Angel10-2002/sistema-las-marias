@@ -221,6 +221,23 @@ def asegurar_estructura_db():
             "UPDATE detalle_creditos SET cantidad=?, precio_unitario=? WHERE id=?",
             (cantidad_real, precio_promedio, credito_id)
         )
+
+    # Reconciliar cabeceras de crédito con sus detalles reales para quitar deudas fantasma.
+    cursor.execute("SELECT id, cliente FROM ventas WHERE estado='CREDITO'")
+    cabeceras_credito = cursor.fetchall()
+    for venta_credito_id, cliente_credito in cabeceras_credito:
+        cursor.execute("SELECT COALESCE(SUM(subtotal),0) FROM detalle_creditos WHERE cliente=?", (cliente_credito,))
+        total_credito_real = cursor.fetchone()[0] or 0
+        if total_credito_real > 0:
+            cursor.execute(
+                "UPDATE ventas SET total=?, origen='Cuenta Corriente' WHERE id=?",
+                (total_credito_real, venta_credito_id)
+            )
+        else:
+            cursor.execute(
+                "UPDATE ventas SET total=0, estado='PAGADO', origen='Cuenta Corriente' WHERE id=?",
+                (venta_credito_id,)
+            )
     
     conn.commit()
     conn.close()
@@ -2958,8 +2975,10 @@ else:
                     cli_pis_cobrar = st.selectbox("Cliente a cancelar", clientes_piscina_deuda, key="sb_cobrar_piscina")
                     if st.button("Cancelar deuda de piscina", use_container_width=True, key="btn_cobrar_piscina"):
                         ejecutar_query("DELETE FROM detalle_creditos WHERE cliente=? AND origen='Piscina'", (cli_pis_cobrar,), commit=True)
-                        ejecutar_query("UPDATE ventas SET estado='PAGADO' WHERE cliente=? AND origen='Piscina' AND estado='CREDITO'", (cli_pis_cobrar,), commit=True)
                         ejecutar_query("UPDATE piscina SET estado='PAGADO' WHERE cliente=? AND estado='CREDITO'", (cli_pis_cobrar,), commit=True)
+                        total_restante_piscina = recalcular_credito_cliente(cli_pis_cobrar)
+                        if total_restante_piscina <= 0:
+                            ejecutar_query("UPDATE ventas SET total=0, estado='PAGADO' WHERE cliente=? AND estado='CREDITO'", (cli_pis_cobrar,), commit=True)
                         st.rerun()
                 else:
                     st.info("No hay cuentas pendientes de piscina.")
