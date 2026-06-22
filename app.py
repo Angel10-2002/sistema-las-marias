@@ -201,6 +201,26 @@ def asegurar_estructura_db():
             "DELETE FROM ventas WHERE cliente=? AND estado='CREDITO' AND id<>?",
             (cliente_dup, id_conservar)
         )
+
+    # Corregir créditos de piscina antiguos que se guardaron como cantidad 1.
+    cursor.execute(
+        """
+        SELECT dc.id, COALESCE(dc.subtotal,0), COALESCE(p.ninos,0), COALESCE(p.adultos,0), COALESCE(p.mayores,0)
+        FROM detalle_creditos dc
+        JOIN piscina p ON p.id=dc.referencia_id
+        WHERE dc.origen='Piscina'
+          AND COALESCE(dc.cantidad,1)=1
+          AND COALESCE(p.ninos,0) + COALESCE(p.adultos,0) + COALESCE(p.mayores,0) > 1
+        """
+    )
+    creditos_piscina_por_corregir = cursor.fetchall()
+    for credito_id, subtotal_credito, ninos_cred, adultos_cred, mayores_cred in creditos_piscina_por_corregir:
+        cantidad_real = int(ninos_cred or 0) + int(adultos_cred or 0) + int(mayores_cred or 0)
+        precio_promedio = float(subtotal_credito or 0) / cantidad_real if cantidad_real else 0
+        cursor.execute(
+            "UPDATE detalle_creditos SET cantidad=?, precio_unitario=? WHERE id=?",
+            (cantidad_real, precio_promedio, credito_id)
+        )
     
     conn.commit()
     conn.close()
@@ -528,56 +548,111 @@ def recalcular_credito_cliente(cliente):
         )
     return total
 
-def liquidar_creditos_cliente(cliente, metodo_pago, receptor_tipo, receptor_nombre, atendido_nombre=""):
+def liquidar_creditos_cliente(cliente, metodo_pago, receptor_tipo, receptor_nombre, atendido_nombre="", detalle_ids=None):
     cliente_normalizado = cliente.strip().upper() if cliente and cliente.strip() else "GENERAL"
+    params_detalles = [cliente_normalizado]
+    filtro_ids = ""
+    if detalle_ids is not None:
+        detalle_ids = [int(det_id) for det_id in detalle_ids]
+        if not detalle_ids:
+            return [], 0
+        filtro_ids = " AND id IN (" + ",".join(["?"] * len(detalle_ids)) + ")"
+        params_detalles.extend(detalle_ids)
     detalles = ejecutar_query(
-        "SELECT id, producto, cantidad, precio_unitario, subtotal, origen, referencia_id FROM detalle_creditos WHERE cliente=?",
-        (cliente_normalizado,),
+        f"SELECT id, producto, cantidad, precio_unitario, subtotal, origen, referencia_id FROM detalle_creditos WHERE cliente=?{filtro_ids}",
+        tuple(params_detalles),
         fetch=True
     ) or []
     if not detalles:
         return [], 0
 
     fecha_pago = datetime.now().strftime('%Y-%m-%d %H:%M')
-    total_ventas = sum(float(d[4] or 0) for d in detalles if (d[5] or "Ventas") == "Ventas")
+    detalles_ventas = [d for d in detalles if (d[5] or "Ventas") == "Ventas"]
+    total_ventas = sum(float(d[4] or 0) for d in detalles_ventas)
     total_general = sum(float(d[4] or 0) for d in detalles)
     referencias_piscina = sorted({d[6] for d in detalles if d[5] == "Piscina" and d[6]})
     referencias_cancha = sorted({d[6] for d in detalles if d[5] == "Cancha" and d[6]})
     tiene_piscina_sin_ref = any(d[5] == "Piscina" and not d[6] for d in detalles)
     tiene_cancha_sin_ref = any(d[5] == "Cancha" and not d[6] for d in detalles)
 
-    for piscina_id in referencias_piscina:
+    if total_ventas > 0:
         ejecutar_query(
-            "UPDATE piscina SET estado='PAGADO', destino='Pagado al Instante', metodo_pago=?, receptor_tipo=?, receptor_nombre=? WHERE id=?",
-            (metodo_pago, receptor_tipo, receptor_nombre, piscina_id),
+            "INSERT INTO ventas (cliente, total, estado, fecha, estado_caja, atendido_por_tipo, atendido_por_nombre, metodo_pago, receptor_tipo, receptor_nombre, origen) VALUES (?,?,?,?, 'ABIERTO', ?,?,?,?,?, 'Ventas')",
+            (cliente_normalizado, total_ventas, "PAGADO", fecha_pago, "Trabajador" if atendido_nombre else "", atendido_nombre, metodo_pago, receptor_tipo, receptor_nombre),
             commit=True
         )
-    if tiene_piscina_sin_ref:
-        ejecutar_query(
-            "UPDATE piscina SET estado='PAGADO', destino='Pagado al Instante', metodo_pago=?, receptor_tipo=?, receptor_nombre=? WHERE cliente=? AND estado='CREDITO'",
-            (metodo_pago, receptor_tipo, receptor_nombre, cliente_normalizado),
-            commit=True
-        )
+        venta_pago_id = ejecutar_query("SELECT max(id) FROM ventas", fetch=True)[0][0]
+        for _, producto, cantidad, precio_unitario, subtotal, _, _ in detalles_ventas:
+            ejecutar_query(
+                "INSERT INTO detalle_ventas (venta_id, producto, cantidad, precio_unitario, subtotal) VALUES (?,?,?,?,?)",
+                (venta_pago_id, producto, cantidad, precio_unitario, subtotal),
+                commit=True
+            )
 
-    for cancha_id in referencias_cancha:
-        ejecutar_query(
-            "UPDATE cancha SET estado='PAGADO', metodo_pago=?, receptor_tipo=?, receptor_nombre=? WHERE id=?",
-            (metodo_pago, receptor_tipo, receptor_nombre, cancha_id),
-            commit=True
-        )
-    if tiene_cancha_sin_ref:
-        ejecutar_query(
-            "UPDATE cancha SET estado='PAGADO', metodo_pago=?, receptor_tipo=?, receptor_nombre=? WHERE cliente=? AND estado='PENDIENTE'",
-            (metodo_pago, receptor_tipo, receptor_nombre, cliente_normalizado),
-            commit=True
-        )
-
+    ids_pagados = [d[0] for d in detalles]
     ejecutar_query(
-        "UPDATE ventas SET estado='PAGADO', total=?, metodo_pago=?, receptor_tipo=?, receptor_nombre=?, atendido_por_nombre=?, origen='Cuenta Corriente' WHERE cliente=? AND estado='CREDITO'",
-        (total_ventas, metodo_pago, receptor_tipo, receptor_nombre, atendido_nombre, cliente_normalizado),
+        "DELETE FROM detalle_creditos WHERE id IN (" + ",".join(["?"] * len(ids_pagados)) + ")",
+        tuple(ids_pagados),
         commit=True
     )
-    ejecutar_query("DELETE FROM detalle_creditos WHERE cliente=?", (cliente_normalizado,), commit=True)
+
+    for piscina_id in referencias_piscina:
+        pendiente_ref = ejecutar_query(
+            "SELECT COUNT(*) FROM detalle_creditos WHERE origen='Piscina' AND referencia_id=?",
+            (piscina_id,),
+            fetch=True
+        )[0][0]
+        if pendiente_ref == 0:
+            ejecutar_query(
+                "UPDATE piscina SET estado='PAGADO', destino='Pagado al Instante', metodo_pago=?, receptor_tipo=?, receptor_nombre=? WHERE id=?",
+                (metodo_pago, receptor_tipo, receptor_nombre, piscina_id),
+                commit=True
+            )
+    if tiene_piscina_sin_ref:
+        pendiente_piscina = ejecutar_query(
+            "SELECT COUNT(*) FROM detalle_creditos WHERE cliente=? AND origen='Piscina'",
+            (cliente_normalizado,),
+            fetch=True
+        )[0][0]
+        if pendiente_piscina == 0:
+            ejecutar_query(
+                "UPDATE piscina SET estado='PAGADO', destino='Pagado al Instante', metodo_pago=?, receptor_tipo=?, receptor_nombre=? WHERE cliente=? AND estado='CREDITO'",
+                (metodo_pago, receptor_tipo, receptor_nombre, cliente_normalizado),
+                commit=True
+            )
+
+    for cancha_id in referencias_cancha:
+        pendiente_ref = ejecutar_query(
+            "SELECT COUNT(*) FROM detalle_creditos WHERE origen='Cancha' AND referencia_id=?",
+            (cancha_id,),
+            fetch=True
+        )[0][0]
+        if pendiente_ref == 0:
+            ejecutar_query(
+                "UPDATE cancha SET estado='PAGADO', metodo_pago=?, receptor_tipo=?, receptor_nombre=? WHERE id=?",
+                (metodo_pago, receptor_tipo, receptor_nombre, cancha_id),
+                commit=True
+            )
+    if tiene_cancha_sin_ref:
+        pendiente_cancha = ejecutar_query(
+            "SELECT COUNT(*) FROM detalle_creditos WHERE cliente=? AND origen='Cancha'",
+            (cliente_normalizado,),
+            fetch=True
+        )[0][0]
+        if pendiente_cancha == 0:
+            ejecutar_query(
+                "UPDATE cancha SET estado='PAGADO', metodo_pago=?, receptor_tipo=?, receptor_nombre=? WHERE cliente=? AND estado='PENDIENTE'",
+                (metodo_pago, receptor_tipo, receptor_nombre, cliente_normalizado),
+                commit=True
+            )
+
+    total_restante = recalcular_credito_cliente(cliente_normalizado)
+    if total_restante <= 0:
+        ejecutar_query(
+            "UPDATE ventas SET estado='PAGADO', total=0, metodo_pago=?, receptor_tipo=?, receptor_nombre=?, atendido_por_nombre=?, origen='Cuenta Corriente' WHERE cliente=? AND estado='CREDITO'",
+            (metodo_pago, receptor_tipo, receptor_nombre, atendido_nombre, cliente_normalizado),
+            commit=True
+        )
 
     items_boleta = [
         {
@@ -2447,22 +2522,55 @@ else:
                         cliente_a_cobrar = st.selectbox("Seleccione el Cliente para revisar/liquidar cuenta:", lista_clientes_deuda, key="sb_cobrar_final")
                         
                         if cliente_a_cobrar:
-                            detalles = ejecutar_query("SELECT producto, cantidad, precio_unitario, subtotal FROM detalle_creditos WHERE cliente=?", (cliente_a_cobrar,), fetch=True)
+                            detalles = ejecutar_query(
+                                "SELECT id, origen, producto, cantidad, precio_unitario, subtotal FROM detalle_creditos WHERE cliente=? ORDER BY fecha ASC, id ASC",
+                                (cliente_a_cobrar,),
+                                fetch=True
+                            )
                             
                             if detalles:
                                 st.markdown(f"**Detalle de consumo real para: {cliente_a_cobrar}**")
-                                df_detalles = pd.DataFrame(detalles, columns=["Producto", "Cantidad", "Unidad P.", "Total parcial"])
-                                st.table(formatear_montos_df(df_detalles, ["Unidad P.", "Total parcial"]))
+                                df_detalles = pd.DataFrame(detalles, columns=["ID", "Origen", "Producto", "Cantidad", "Unidad P.", "Total parcial"])
+                                df_detalles.insert(0, "Pagar", True)
+                                df_editor_creditos = st.data_editor(
+                                    formatear_montos_df(df_detalles, ["Unidad P.", "Total parcial"]),
+                                    use_container_width=True,
+                                    hide_index=True,
+                                    disabled=["ID", "Origen", "Producto", "Cantidad", "Unidad P.", "Total parcial"],
+                                    column_config={
+                                        "Pagar": st.column_config.CheckboxColumn("Pagar", help="Desmarca lo que quedará pendiente."),
+                                        "ID": None
+                                    },
+                                    key=f"editor_creditos_cobro_{cliente_a_cobrar}"
+                                )
                                 
-                                total_deuda = df_detalles["Total parcial"].sum()
+                                ids_seleccionados_pago = [
+                                    int(fila["ID"])
+                                    for _, fila in df_editor_creditos.iterrows()
+                                    if bool(fila["Pagar"])
+                                ]
+                                total_deuda = sum(
+                                    float(det[5] or 0)
+                                    for det in detalles
+                                    if int(det[0]) in ids_seleccionados_pago
+                                )
+                                total_pendiente_post = sum(float(det[5] or 0) for det in detalles) - total_deuda
+                                col_total_sel, col_total_pen = st.columns(2)
+                                with col_total_sel:
+                                    st.metric("Total seleccionado para cobrar", f"S/. {total_deuda:.2f}")
+                                with col_total_pen:
+                                    st.metric("Quedará pendiente", f"S/. {total_pendiente_post:.2f}")
                                 
-                                if st.button(f"💵 Cerrar Cuenta y Cobrar S/. {total_deuda:.2f}", type="primary", use_container_width=True, key="btn_liquidar_final"):
+                                if not ids_seleccionados_pago:
+                                    st.warning("Selecciona al menos un consumo para poder cobrar.")
+                                elif st.button(f"💵 Cerrar Cuenta y Cobrar S/. {total_deuda:.2f}", type="primary", use_container_width=True, key="btn_liquidar_final"):
                                     items_boleta, total_deuda = liquidar_creditos_cliente(
                                         cliente_a_cobrar,
                                         metodo_pago_venta,
                                         receptor_tipo_venta,
                                         receptor_nombre_venta,
-                                        atendido_nombre
+                                        atendido_nombre,
+                                        ids_seleccionados_pago
                                     )
                                     encolar_impresion_nota(cliente_a_cobrar, items_boleta, total_deuda, "LIQUIDACION DE CREDITO", atendido_nombre)
                                     st.rerun()
@@ -2770,7 +2878,19 @@ else:
                         )
                         piscina_id = ejecutar_query("SELECT max(id) FROM piscina", fetch=True)[0][0]
                         if estado_piscina == "CREDITO":
-                            registrar_credito_cliente(cliente_piscina_guardar, "Piscina", "ENTRADA PISCINA", 1, monto_final, monto_final, fecha_registro, piscina_id, trabajador_nombre=trabajador_piscina)
+                            total_personas_piscina = int(ninos or 0) + int(adultos or 0) + int(mayores or 0)
+                            precio_promedio_piscina = (float(monto_final or 0) / total_personas_piscina) if total_personas_piscina else 0
+                            registrar_credito_cliente(
+                                cliente_piscina_guardar,
+                                "Piscina",
+                                "ENTRADA PISCINA",
+                                total_personas_piscina,
+                                precio_promedio_piscina,
+                                monto_final,
+                                fecha_registro,
+                                piscina_id,
+                                trabajador_nombre=trabajador_piscina
+                            )
                         st.success("¡Ingreso de piscina guardado exitosamente!")
                         
                         # Estructuración detallada para el ticket térmico
