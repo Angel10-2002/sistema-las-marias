@@ -2956,7 +2956,10 @@ else:
             # --- COLUMNA 3: HISTORIAL RECIENTE DE ENTRADAS ---
             with col_p3:
                 st.subheader("Historial de Entradas")
-                registros_piscina = ejecutar_query("SELECT ninos, adultos, monto_pagado, fecha, cliente, estado FROM piscina ORDER BY id DESC", fetch=True)
+                registros_piscina = ejecutar_query(
+                    "SELECT ninos, adultos, monto_pagado, fecha, cliente, estado FROM piscina WHERE estado_caja='ABIERTO' ORDER BY id DESC",
+                    fetch=True
+                )
                 if registros_piscina:
                     df_pis = pd.DataFrame(registros_piscina, columns=["Niños", "Adultos", "Monto", "Fecha/Hora", "Cliente", "Estado"])
                     st.dataframe(df_pis, use_container_width=True, hide_index=True)
@@ -3010,6 +3013,14 @@ else:
             with col_c1:
                 cancha_nonce = st.session_state.get("cancha_form_nonce", 0)
                 c_cliente = st.text_input("Nombre del Cliente", key=f"cliente_cancha_{cancha_nonce}")
+                destino_cancha = st.radio("Destino de la Venta", ["Pagado al Instante", "Llevar a Cuenta Crédito"], horizontal=True, key=f"destino_cancha_{cancha_nonce}")
+                cliente_credito_cancha = c_cliente.strip().upper()
+                if destino_cancha == "Llevar a Cuenta Crédito":
+                    opciones_credito_cancha = ["Usar cliente escrito"] + clientes_credito_abiertos()
+                    credito_cancha_sel = st.selectbox("Cuenta crédito existente", opciones_credito_cancha, key=f"sb_credito_existente_cancha_{cancha_nonce}")
+                    if credito_cancha_sel != "Usar cliente escrito":
+                        cliente_credito_cancha = credito_cancha_sel
+                        st.caption(f"Se agregará a la cuenta corriente de: {cliente_credito_cancha}")
                 c_fecha = st.date_input("Fecha del Alquiler", value=datetime.today(), key=f"fecha_cancha_{cancha_nonce}")
                 
                 horario_final_str = selector_horario_reserva(f"cancha_{cancha_nonce}")
@@ -3020,14 +3031,6 @@ else:
                 c_adelanto = st.number_input("Monto de Adelanto (S/.)", min_value=0.0, value=0.0, key=f"adelanto_cancha_{cancha_nonce}")
                 if c_adelanto > c_total:
                     st.warning("El adelanto no puede ser mayor al monto total contractual.")
-                destino_cancha = st.radio("Destino de la Venta", ["Pagado al Instante", "Llevar a Cuenta Crédito"], horizontal=True, key=f"destino_cancha_{cancha_nonce}")
-                cliente_credito_cancha = c_cliente.strip().upper()
-                if destino_cancha == "Llevar a Cuenta Crédito":
-                    opciones_credito_cancha = ["Usar cliente escrito"] + clientes_credito_abiertos()
-                    credito_cancha_sel = st.selectbox("Cuenta crédito existente", opciones_credito_cancha, key=f"sb_credito_existente_cancha_{cancha_nonce}")
-                    if credito_cancha_sel != "Usar cliente escrito":
-                        cliente_credito_cancha = credito_cancha_sel
-                        st.caption(f"Se agregará a la cuenta corriente de: {cliente_credito_cancha}")
                 _, trabajador_cancha = seleccionar_trabajador("Trabajador que atendió", ("Trabajador",), f"cancha_trabajador_{cancha_nonce}")
                 metodo_cancha, receptor_cancha, receptor_nombre_cancha = seleccionar_pago_receptor(
                     f"cancha_{cancha_nonce}",
@@ -3051,7 +3054,7 @@ else:
                             tipos_bloqueantes = ["Cancha Grande 3", "Cancha Grande", "Cancha Mediana 1", "Cancha Mediana 2"]
                         marcas = ",".join(["?"] * len(tipos_bloqueantes))
                         cruce_db = ejecutar_query(
-                            f"SELECT id, cliente, tipo_cancha FROM cancha WHERE fecha_reserva = ? AND horario = ? AND tipo_cancha IN ({marcas}) AND estado IN ('PENDIENTE', 'PAGADO')",
+                            f"SELECT id, cliente, tipo_cancha FROM cancha WHERE fecha_reserva = ? AND horario = ? AND tipo_cancha IN ({marcas}) AND estado IN ('PENDIENTE', 'PAGADO') AND estado_caja='ABIERTO'",
                             tuple([fecha_str, horario_final_str] + tipos_bloqueantes),
                             fetch=True
                         )
@@ -3149,7 +3152,7 @@ else:
                 st.subheader("Estado Visual de la Cancha")
                 fecha_visual = c_fecha.strftime("%Y-%m-%d")
                 reservas_hoy_visual = ejecutar_query(
-                    "SELECT tipo_cancha FROM cancha WHERE fecha_reserva=? AND horario=? AND estado IN ('PENDIENTE','PAGADO')",
+                    "SELECT tipo_cancha FROM cancha WHERE fecha_reserva=? AND horario=? AND estado IN ('PENDIENTE','PAGADO') AND estado_caja='ABIERTO'",
                     (fecha_visual, horario_final_str),
                     fetch=True
                 )
@@ -3175,7 +3178,10 @@ else:
                 
                 buscar_cliente = st.text_input("🔍 Buscar reserva por nombre de cliente:", placeholder="Escribe el nombre aquí...").strip().upper()
                 
-                reservas = ejecutar_query("SELECT id, cliente, fecha_reserva, horario, monto_total, adelanto, (monto_total - adelanto), estado FROM cancha ORDER BY id DESC", fetch=True)
+                reservas = ejecutar_query(
+                    "SELECT id, cliente, fecha_reserva, horario, monto_total, adelanto, (monto_total - adelanto), estado FROM cancha WHERE estado_caja='ABIERTO' ORDER BY id DESC",
+                    fetch=True
+                )
                 
                 if reservas:
                     df_res = pd.DataFrame(reservas, columns=["ID", "Cliente", "Fecha", "Horario", "Total", "Adelanto", "Saldo Pendiente", "Estado"])
