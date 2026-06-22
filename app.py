@@ -2847,15 +2847,19 @@ else:
                 )
                 st.caption("*Adultos: 13 años a más*")
                 mayores = 0
-                cliente_piscina = st.text_input("Cliente", value="CLIENTE PISCINA", key=f"cliente_piscina_{piscina_nonce}").strip().upper() or "CLIENTE PISCINA"
                 destino_piscina = st.radio("Destino de la Venta", ["Pagado al Instante", "Llevar a Cuenta Crédito"], horizontal=True, key=f"destino_piscina_{piscina_nonce}")
-                cliente_credito_piscina = cliente_piscina
+                cliente_piscina = "CLIENTE PISCINA"
+                cliente_credito_piscina = ""
                 if destino_piscina == "Llevar a Cuenta Crédito":
-                    opciones_credito_piscina = ["Usar cliente escrito"] + clientes_credito_abiertos()
+                    opciones_credito_piscina = ["➕ AGREGAR NUEVO CLIENTE"] + clientes_credito_abiertos()
                     credito_piscina_sel = st.selectbox("Cuenta crédito existente", opciones_credito_piscina, key=f"sb_credito_existente_piscina_{piscina_nonce}")
-                    if credito_piscina_sel != "Usar cliente escrito":
+                    if credito_piscina_sel == "➕ AGREGAR NUEVO CLIENTE":
+                        cliente_credito_piscina = st.text_input("Nombre del nuevo cliente", key=f"txt_nuevo_credito_piscina_{piscina_nonce}").strip().upper()
+                    else:
                         cliente_credito_piscina = credito_piscina_sel
                         st.caption(f"Se agregará a la cuenta corriente de: {cliente_credito_piscina}")
+                else:
+                    cliente_piscina = st.text_input("Cliente", value="CLIENTE PISCINA", key=f"cliente_piscina_{piscina_nonce}").strip().upper() or "CLIENTE PISCINA"
                 _, trabajador_piscina = seleccionar_trabajador("Trabajador que atendió", ("Trabajador",), f"piscina_trabajador_{piscina_nonce}")
                 metodo_piscina, receptor_piscina, receptor_nombre_piscina = seleccionar_pago_receptor(
                     f"piscina_{piscina_nonce}",
@@ -2881,6 +2885,8 @@ else:
                 if st.button("Registrar Ingreso Piscina", use_container_width=True, type="primary"):
                     if ninos == 0 and adultos == 0 and mayores == 0:
                         st.error("Debes ingresar al menos 1 persona para registrar la entrada.")
+                    elif destino_piscina == "Llevar a Cuenta Crédito" and not cliente_credito_piscina.strip():
+                        st.error("Selecciona o ingresa el cliente de la cuenta crédito.")
                     elif monto_mayor_al_sugerido:
                         st.error("No se guardó el ingreso porque el monto final supera el pago sugerido.")
                     else:
@@ -3012,15 +3018,20 @@ else:
             # --- COLUMNA 1: REGISTRO DE NUEVA RESERVA ---
             with col_c1:
                 cancha_nonce = st.session_state.get("cancha_form_nonce", 0)
-                c_cliente = st.text_input("Nombre del Cliente", key=f"cliente_cancha_{cancha_nonce}")
                 destino_cancha = st.radio("Destino de la Venta", ["Pagado al Instante", "Llevar a Cuenta Crédito"], horizontal=True, key=f"destino_cancha_{cancha_nonce}")
-                cliente_credito_cancha = c_cliente.strip().upper()
+                c_cliente = ""
+                cliente_credito_cancha = ""
                 if destino_cancha == "Llevar a Cuenta Crédito":
-                    opciones_credito_cancha = ["Usar cliente escrito"] + clientes_credito_abiertos()
+                    opciones_credito_cancha = ["➕ AGREGAR NUEVO CLIENTE"] + clientes_credito_abiertos()
                     credito_cancha_sel = st.selectbox("Cuenta crédito existente", opciones_credito_cancha, key=f"sb_credito_existente_cancha_{cancha_nonce}")
-                    if credito_cancha_sel != "Usar cliente escrito":
+                    if credito_cancha_sel == "➕ AGREGAR NUEVO CLIENTE":
+                        cliente_credito_cancha = st.text_input("Nombre del nuevo cliente", key=f"txt_nuevo_credito_cancha_{cancha_nonce}").strip().upper()
+                    else:
                         cliente_credito_cancha = credito_cancha_sel
                         st.caption(f"Se agregará a la cuenta corriente de: {cliente_credito_cancha}")
+                else:
+                    c_cliente = st.text_input("Nombre del Cliente", key=f"cliente_cancha_{cancha_nonce}").strip().upper()
+                    cliente_credito_cancha = c_cliente
                 c_fecha = st.date_input("Fecha del Alquiler", value=datetime.today(), key=f"fecha_cancha_{cancha_nonce}")
                 
                 horario_final_str = selector_horario_reserva(f"cancha_{cancha_nonce}")
