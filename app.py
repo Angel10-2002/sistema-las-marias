@@ -1542,6 +1542,18 @@ def cambiar_modulo_admin():
         st.session_state["modulo_admin_activo"] = modulo
         st.query_params["tab"] = modulo
 
+def cambiar_modulo_admin_principal():
+    modulo = st.session_state.get("modulo_admin_principal_selector")
+    if modulo:
+        st.session_state["modulo_admin_activo"] = modulo
+        st.query_params["tab"] = modulo
+
+def cambiar_modulo_admin_ajustes():
+    modulo = st.session_state.get("modulo_admin_ajustes_selector")
+    if modulo:
+        st.session_state["modulo_admin_activo"] = modulo
+        st.query_params["tab"] = modulo
+
 def resolver_modulo_admin(opciones_menu):
     modulo_guardado = st.session_state.get("modulo_admin_activo")
     modulo_url = obtener_parametro_url("tab")
@@ -2176,15 +2188,28 @@ else:
             opciones_menu[7]: "Configuración del Sistema"
         }
         modulo_actual = resolver_modulo_admin(opciones_menu)
-        if st.session_state.get("modulo_admin_selector") not in opciones_menu:
-            st.session_state["modulo_admin_selector"] = opciones_menu[0]
+        menu_principal = opciones_menu[:6]
+        menu_ajustes = opciones_menu[6:]
+        for key_menu in ("modulo_admin_principal_selector", "modulo_admin_ajustes_selector"):
+            if key_menu in st.session_state:
+                del st.session_state[key_menu]
         st.sidebar.markdown("### Menú Principal")
         st.sidebar.radio(
             "Módulos",
-            opciones_menu,
+            menu_principal,
+            index=menu_principal.index(modulo_actual) if modulo_actual in menu_principal else None,
             label_visibility="collapsed",
-            key="modulo_admin_selector",
-            on_change=cambiar_modulo_admin
+            key="modulo_admin_principal_selector",
+            on_change=cambiar_modulo_admin_principal
+        )
+        st.sidebar.markdown("### Ajustes")
+        st.sidebar.radio(
+            "Ajustes",
+            menu_ajustes,
+            index=menu_ajustes.index(modulo_actual) if modulo_actual in menu_ajustes else None,
+            label_visibility="collapsed",
+            key="modulo_admin_ajustes_selector",
+            on_change=cambiar_modulo_admin_ajustes
         )
         modulo_actual = st.session_state["modulo_admin_activo"]
         if st.sidebar.button("🔓 Cerrar Sesión", type="secondary", use_container_width=True):
@@ -3298,7 +3323,7 @@ else:
                             <style>
                             .ingreso-row-head, .ingreso-row {
                                 display: grid;
-                                grid-template-columns: 1.05fr .65fr 1.25fr 1.25fr .75fr 1fr 1.15fr;
+                                grid-template-columns: 1.25fr 1.15fr 1.35fr 1.2fr .75fr 1.1fr 1.15fr;
                                 gap: 8px;
                                 align-items: center;
                             }
@@ -3319,65 +3344,96 @@ else:
                             }
                             </style>
                             <div class="ingreso-row-head">
-                                <div>Origen</div><div>ID</div><div>Cliente</div><div>Fecha/Hora</div><div>Monto</div><div>Método</div><div>Acción</div>
+                                <div>Cliente</div><div>Origenes</div><div>IDs</div><div>Ultimo movimiento</div><div>Monto</div><div>Metodo</div><div>Accion</div>
                             </div>
                             """,
                             unsafe_allow_html=True
                         )
-                        for idx, row in df_detalle_ingresos.reset_index(drop=True).iterrows():
-                            cols_ingreso = st.columns([1.05, .65, 1.25, 1.25, .75, 1, 1.15])
+                        grupos_ingresos = []
+                        for cliente_grupo, grupo in df_detalle_ingresos.groupby("Cliente", sort=False):
+                            grupo = grupo.reset_index(drop=True)
+                            origenes = ", ".join(dict.fromkeys(grupo["Origen"].fillna("").astype(str)))
+                            metodos = ", ".join(dict.fromkeys(grupo["Método de pago"].fillna("").astype(str)))
+                            ids_grupo = ", ".join([str(int(valor)) for valor in grupo["ID"]])
+                            total_grupo = float(pd.to_numeric(grupo["Monto"], errors="coerce").fillna(0).sum())
+                            grupos_ingresos.append({
+                                "cliente": cliente_grupo,
+                                "grupo": grupo,
+                                "origenes": origenes,
+                                "metodos": metodos,
+                                "ids": ids_grupo,
+                                "fecha": grupo.iloc[0]["Fecha/Hora"],
+                                "total": total_grupo
+                            })
+
+                        for idx, ingreso_grupo in enumerate(grupos_ingresos):
+                            cols_ingreso = st.columns([1.25, 1.15, 1.35, 1.2, .75, 1.1, 1.15])
                             with cols_ingreso[0]:
-                                st.markdown(f"<div class='ingreso-cell'>{row['Origen']}</div>", unsafe_allow_html=True)
+                                st.markdown(f"<div class='ingreso-cell'>{ingreso_grupo['cliente']}</div>", unsafe_allow_html=True)
                             with cols_ingreso[1]:
-                                st.markdown(f"<div class='ingreso-cell'>{int(row['ID'])}</div>", unsafe_allow_html=True)
+                                st.markdown(f"<div class='ingreso-cell'>{ingreso_grupo['origenes']}</div>", unsafe_allow_html=True)
                             with cols_ingreso[2]:
-                                st.markdown(f"<div class='ingreso-cell'>{row['Cliente']}</div>", unsafe_allow_html=True)
+                                st.markdown(f"<div class='ingreso-cell'>{ingreso_grupo['ids']}</div>", unsafe_allow_html=True)
                             with cols_ingreso[3]:
-                                st.markdown(f"<div class='ingreso-cell'>{row['Fecha/Hora']}</div>", unsafe_allow_html=True)
+                                st.markdown(f"<div class='ingreso-cell'>{ingreso_grupo['fecha']}</div>", unsafe_allow_html=True)
                             with cols_ingreso[4]:
-                                st.markdown(f"<div class='ingreso-cell'>S/. {float(row['Monto'] or 0):.2f}</div>", unsafe_allow_html=True)
+                                st.markdown(f"<div class='ingreso-cell'>S/. {ingreso_grupo['total']:.2f}</div>", unsafe_allow_html=True)
                             with cols_ingreso[5]:
-                                st.markdown(f"<div class='ingreso-cell'>{row['Método de pago']}</div>", unsafe_allow_html=True)
+                                st.markdown(f"<div class='ingreso-cell'>{ingreso_grupo['metodos']}</div>", unsafe_allow_html=True)
                             with cols_ingreso[6]:
-                                if st.button("IMPRIMIR NOTA DE VENTA", use_container_width=True, key=f"btn_reimprimir_ingreso_{row['Origen']}_{row['ID']}_{idx}"):
-                                    cliente_imp, fecha_imp, items_imp, total_imp = detalle_ingreso_caja(
-                                        row["Origen"],
-                                        int(row["ID"]),
-                                        float(row["Monto"] or 0)
-                                    )
-                                    items_ticket = [
-                                        {"producto": item[0], "cantidad": item[1], "subtotal": float(item[3] or 0)}
-                                        for item in items_imp
-                                    ]
-                                    if not items_ticket:
-                                        items_ticket = [{"producto": row["Origen"], "cantidad": 1, "subtotal": float(row["Monto"] or 0)}]
+                                if st.button("IMPRIMIR NOTA DE VENTA", use_container_width=True, key=f"btn_reimprimir_ingreso_cliente_{idx}_{ingreso_grupo['cliente']}"):
+                                    items_ticket = []
+                                    total_ticket = 0
+                                    for _, row in ingreso_grupo["grupo"].iterrows():
+                                        cliente_imp, fecha_imp, items_imp, total_imp = detalle_ingreso_caja(
+                                            row["Origen"],
+                                            int(row["ID"]),
+                                            float(row["Monto"] or 0)
+                                        )
+                                        total_ticket += float(total_imp or row["Monto"] or 0)
+                                        if items_imp:
+                                            for item in items_imp:
+                                                items_ticket.append({
+                                                    "producto": f"{row['Origen']} - {item[0]}",
+                                                    "cantidad": item[1],
+                                                    "subtotal": float(item[3] or 0)
+                                                })
+                                        else:
+                                            items_ticket.append({"producto": row["Origen"], "cantidad": 1, "subtotal": float(row["Monto"] or 0)})
                                     encolar_impresion_nota(
-                                        cliente_imp or row["Cliente"],
+                                        ingreso_grupo["cliente"],
                                         items_ticket,
-                                        float(total_imp or row["Monto"] or 0),
-                                        f"REIMPRESION - {row['Origen']}",
+                                        total_ticket,
+                                        "REIMPRESION CONSOLIDADA",
                                         ""
                                     )
                                     st.rerun()
                         opciones_detalle = {}
-                        for idx, row in df_detalle_ingresos.reset_index(drop=True).iterrows():
-                            etiqueta_detalle = f"{row['Origen']} | {row['Cliente']} | {row['Fecha/Hora']} | S/. {float(row['Monto'] or 0):.2f} | {row['Método de pago']}"
+                        for idx, ingreso_grupo in enumerate(grupos_ingresos):
+                            etiqueta_detalle = f"{ingreso_grupo['cliente']} | {ingreso_grupo['origenes']} | S/. {ingreso_grupo['total']:.2f} | {ingreso_grupo['metodos']}"
                             opciones_detalle[etiqueta_detalle] = idx
-                        seleccion_detalle = st.selectbox("Ver detalle del ingreso", list(opciones_detalle.keys()), key="sb_detalle_ingreso_caja")
-                        fila_detalle = df_detalle_ingresos.iloc[opciones_detalle[seleccion_detalle]]
-                        cliente_det, fecha_det, items_det, total_det = detalle_ingreso_caja(
-                            fila_detalle["Origen"],
-                            int(fila_detalle["ID"]),
-                            float(fila_detalle["Monto"] or 0)
-                        )
-                        st.markdown(f"#### Detalle de consumo - {cliente_det or fila_detalle['Cliente']}")
-                        st.write(f"Origen: {fila_detalle['Origen']} | Fecha/Hora: {fecha_det or fila_detalle['Fecha/Hora']} | Método de pago: {fila_detalle['Método de pago']}")
-                        if items_det:
-                            df_items_det = pd.DataFrame(items_det, columns=["Concepto", "Cantidad", "Precio", "Subtotal"])
+                        seleccion_detalle = st.selectbox("Ver detalle del cliente", list(opciones_detalle.keys()), key="sb_detalle_ingreso_caja")
+                        ingreso_detalle = grupos_ingresos[opciones_detalle[seleccion_detalle]]
+                        filas_items_det = []
+                        for _, fila_detalle in ingreso_detalle["grupo"].iterrows():
+                            cliente_det, fecha_det, items_det, total_det = detalle_ingreso_caja(
+                                fila_detalle["Origen"],
+                                int(fila_detalle["ID"]),
+                                float(fila_detalle["Monto"] or 0)
+                            )
+                            if items_det:
+                                for item in items_det:
+                                    filas_items_det.append((fila_detalle["Origen"], item[0], item[1], item[2], item[3]))
+                            else:
+                                filas_items_det.append((fila_detalle["Origen"], fila_detalle["Origen"], 1, fila_detalle["Monto"], fila_detalle["Monto"]))
+                        st.markdown(f"#### Detalle de consumo - {ingreso_detalle['cliente']}")
+                        st.write(f"Origenes: {ingreso_detalle['origenes']} | Metodo de pago: {ingreso_detalle['metodos']}")
+                        if filas_items_det:
+                            df_items_det = pd.DataFrame(filas_items_det, columns=["Origen", "Concepto", "Cantidad", "Precio", "Subtotal"])
                             st.dataframe(formatear_montos_df(df_items_det, ["Precio", "Subtotal"]), use_container_width=True, hide_index=True)
                         else:
                             st.info("No se encontraron artículos detallados para este ingreso.")
-                        st.metric("Total del ingreso", f"S/. {float(total_det or 0):.2f}")
+                        st.metric("Total del cliente", f"S/. {ingreso_detalle['total']:.2f}")
                     else:
                         st.info("No hay ingresos que coincidan con el método de pago o cliente buscado.")
                 else:
