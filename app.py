@@ -1584,6 +1584,12 @@ def cambiar_modulo_admin():
         st.session_state["modulo_admin_activo"] = modulo
         st.query_params["tab"] = modulo
 
+def activar_modulo_admin(modulo):
+    st.session_state["modulo_admin_activo"] = modulo
+    st.session_state["modulo_admin_selector"] = modulo
+    st.query_params["tab"] = modulo
+    st.rerun()
+
 def resolver_modulo_admin(opciones_menu):
     modulo_guardado = st.session_state.get("modulo_admin_activo")
     modulo_url = obtener_parametro_url("tab")
@@ -1806,73 +1812,52 @@ def aplicar_estilos_sistema():
             margin-top: 10px;
         }
 
-        [data-testid="stSidebar"] div[role="radiogroup"] {
-            gap: 3px;
-            background: transparent;
-            border: 0;
-        }
-
-        [data-testid="stSidebar"] label[data-baseweb="radio"] {
+        [data-testid="stSidebar"] [class*="st-key-nav_idle_"] button,
+        [data-testid="stSidebar"] [class*="st-key-nav_active_"] button {
             min-height: 34px;
-            margin: 0;
+            width: 100%;
+            margin: 0 0 3px 0;
             padding: 8px 10px;
             border: 1px solid transparent;
             border-radius: 5px;
             color: #dce4f2 !important;
             background: transparent;
+            box-shadow: none !important;
+            justify-content: flex-start;
+            text-align: left;
             transition: background 0.15s ease, color 0.15s ease, transform 0.15s ease;
         }
 
-        [data-testid="stSidebar"] label[data-baseweb="radio"]:hover {
+        [data-testid="stSidebar"] [class*="st-key-nav_idle_"] button:hover {
             border-color: transparent;
             background: rgba(255, 255, 255, 0.08);
+            color: #ffffff !important;
             transform: translateX(2px);
         }
 
-        [data-testid="stSidebar"] label[data-baseweb="radio"]:has(input:checked) {
+        [data-testid="stSidebar"] [class*="st-key-nav_active_"] button,
+        [data-testid="stSidebar"] [class*="st-key-nav_active_"] button:hover {
             border-color: #ffffff;
             background: #ffffff;
+            color: #111827 !important;
             box-shadow: 0 10px 22px rgba(0, 0, 0, 0.20);
             transform: none;
         }
 
-        [data-testid="stSidebar"] label[data-baseweb="radio"] p {
+        [data-testid="stSidebar"] [class*="st-key-nav_idle_"] button p,
+        [data-testid="stSidebar"] [class*="st-key-nav_idle_"] button span {
             color: #dce4f2 !important;
             font-size: 12px !important;
             font-weight: 800 !important;
             line-height: 1.15 !important;
         }
 
-        [data-testid="stSidebar"] label[data-baseweb="radio"]:has(input:checked) p {
+        [data-testid="stSidebar"] [class*="st-key-nav_active_"] button p,
+        [data-testid="stSidebar"] [class*="st-key-nav_active_"] button span {
             color: #111827 !important;
+            font-size: 12px !important;
             font-weight: 900 !important;
-        }
-
-        [data-testid="stSidebar"] label[data-baseweb="radio"] > div:first-child {
-            display: none;
-        }
-
-        [data-testid="stSidebar"] div[role="radiogroup"] label[data-baseweb="radio"]:nth-of-type(7) {
-            position: relative;
-            margin-top: 33px;
-        }
-
-        [data-testid="stSidebar"] div[role="radiogroup"] label[data-baseweb="radio"]:nth-of-type(7)::before {
-            content: "Ajustes";
-            display: block;
-            position: absolute;
-            top: -24px;
-            left: 4px;
-            right: 0;
-            padding: 0;
-            border: 0;
-            background: transparent;
-            color: #9aa7bd !important;
-            font-size: 12px;
-            font-weight: 850;
             line-height: 1.2;
-            pointer-events: none;
-            box-shadow: none;
         }
 
         [data-testid="stSidebar"] .stButton > button {
@@ -2261,16 +2246,20 @@ else:
             if key_menu in st.session_state:
                 del st.session_state[key_menu]
         st.sidebar.markdown("<div class='sidebar-section-title'>Menú Principal</div>", unsafe_allow_html=True)
-        st.sidebar.radio(
-            "Módulos",
-            opciones_menu,
-            index=opciones_menu.index(modulo_actual) if modulo_actual in opciones_menu else 0,
-            label_visibility="collapsed",
-            key="modulo_admin_selector",
-            on_change=cambiar_modulo_admin
-        )
+        for idx_menu, opcion_menu in enumerate(opciones_menu[:6]):
+            estado_nav = "active" if opcion_menu == modulo_actual else "idle"
+            with st.sidebar.container(key=f"nav_{estado_nav}_{idx_menu}"):
+                if st.button(opcion_menu, key=f"btn_nav_{idx_menu}", use_container_width=True):
+                    activar_modulo_admin(opcion_menu)
+
+        st.sidebar.markdown("<div class='sidebar-section-title settings'>Ajustes</div>", unsafe_allow_html=True)
+        for idx_menu, opcion_menu in enumerate(opciones_menu[6:], start=6):
+            estado_nav = "active" if opcion_menu == modulo_actual else "idle"
+            with st.sidebar.container(key=f"nav_{estado_nav}_{idx_menu}"):
+                if st.button(opcion_menu, key=f"btn_nav_{idx_menu}", use_container_width=True):
+                    activar_modulo_admin(opcion_menu)
         modulo_actual = st.session_state["modulo_admin_activo"]
-        if st.sidebar.button("🔓 Cerrar Sesión", type="secondary", use_container_width=True):
+        if st.sidebar.button("🔓 Cerrar Sesión", type="secondary", use_container_width=True, key="btn_logout_sidebar"):
             logout()
 
         st.title("Panel de Administración - LAS MARÍAS")
