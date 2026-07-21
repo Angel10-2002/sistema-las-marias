@@ -2771,11 +2771,14 @@ else:
                 items_db = ejecutar_query("SELECT id, nombre, proveedor, costo, precio, stock FROM inventario", fetch=True)
                 
                 if items_db:
+                    if "stock_edit_nonce" not in st.session_state:
+                        st.session_state["stock_edit_nonce"] = 0
                     opciones_items = {f"{item[1]} (ID: {item[0]})": item for item in items_db}
                     item_seleccionado = st.selectbox("Selecciona el producto a modificar:", list(opciones_items.keys()))
                     
                     if item_seleccionado:
                         id_edit, nom_edit, prov_edit, cost_edit, prec_edit, stock_edit = opciones_items[item_seleccionado]
+                        stock_edit_nonce = st.session_state["stock_edit_nonce"]
                         
                         col_ed1, col_ed2 = st.columns(2)
                         with col_ed1:
@@ -2790,9 +2793,9 @@ else:
                         with col_stock_actual:
                             st.number_input("Stock Actual", min_value=0, value=int(stock_edit), disabled=True, key=f"stock_actual_{id_edit}")
                         with col_stock_add:
-                            stock_a_sumar = st.number_input("Añadir Stock", min_value=0, value=0, step=1, key=f"stock_add_{id_edit}")
+                            stock_a_sumar = st.number_input("Añadir Stock", min_value=0, value=0, step=1, key=f"stock_add_{id_edit}_{stock_edit_nonce}")
                         with col_stock_sub:
-                            stock_a_restar = st.number_input("Disminuir Stock", min_value=0, value=0, step=1, key=f"stock_sub_{id_edit}")
+                            stock_a_restar = st.number_input("Disminuir Stock", min_value=0, value=0, step=1, key=f"stock_sub_{id_edit}_{stock_edit_nonce}")
 
                         stock_preview = int(stock_edit) + int(stock_a_sumar) - int(stock_a_restar)
                         if stock_preview < 0:
@@ -2802,7 +2805,7 @@ else:
                         
                         col_btn1, col_btn2 = st.columns(2)
                         with col_btn1:
-                            if st.button("📝 Guardar Cambios", use_container_width=True):
+                            if st.button("📝 Guardar Cambios", use_container_width=True, key=f"btn_guardar_stock_{id_edit}_{stock_edit_nonce}"):
                                 if nuevo_nombre.strip():
                                     stock_final = int(stock_edit) + int(stock_a_sumar) - int(stock_a_restar)
                                     if stock_final < 0:
@@ -2819,7 +2822,10 @@ else:
                                         if int(stock_a_restar) > 0:
                                             registrar_movimiento_stock(id_edit, producto_mov, "DISMINUCION", stock_a_restar, int(stock_edit) + int(stock_a_sumar), stock_final, "Panel de edición")
                                         st.success("¡Modificado!")
+                                        st.session_state["stock_edit_nonce"] += 1
                                         st.rerun()
+                                else:
+                                    st.error("Ingrese un nombre válido para el producto.")
                         with col_btn2:
                             if st.button("❌ Eliminar Producto", type="secondary", use_container_width=True):
                                 ejecutar_query("DELETE FROM inventario WHERE id=?", (id_edit,), commit=True)
