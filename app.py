@@ -1740,8 +1740,8 @@ def aplicar_estilos_sistema():
         }
 
         [data-testid="stSidebar"] {
-            background: #222b35;
-            border-right: 1px solid rgba(255, 255, 255, 0.08);
+            background: #121827;
+            border-right: 1px solid rgba(255, 255, 255, 0.07);
             display: block !important;
             visibility: visible !important;
             transform: none !important;
@@ -1765,9 +1765,9 @@ def aplicar_estilos_sistema():
             margin-left: auto;
             margin-right: auto;
             padding: 8px;
-            border-radius: 8px;
-            background: rgba(255, 255, 255, 0.10);
-            box-shadow: 0 10px 24px rgba(0, 0, 0, 0.24);
+            border-radius: 10px;
+            background: rgba(255, 255, 255, 0.08);
+            box-shadow: 0 12px 28px rgba(0, 0, 0, 0.22);
         }
 
         [data-testid="stSidebar"] h1 {
@@ -1787,101 +1787,106 @@ def aplicar_estilos_sistema():
         }
 
         [data-testid="stSidebar"] [data-testid="stAlert"] {
-            background: rgba(255, 255, 255, 0.10);
-            border: 1px solid rgba(255, 255, 255, 0.14);
+            background: #263348;
+            border: 1px solid rgba(255, 255, 255, 0.10);
             border-radius: 8px;
         }
 
         .sidebar-section-title {
-            margin: 18px 0 8px 0;
-            padding: 7px 10px 7px 12px;
-            border-left: 4px solid #16b8c4;
-            border-radius: 6px;
-            background: rgba(255, 255, 255, 0.06);
-            color: #ffffff !important;
-            font-size: 15px;
-            font-weight: 900;
+            margin: 18px 0 8px 4px;
+            padding: 0;
+            color: #9aa7bd !important;
+            font-size: 12px;
+            font-weight: 850;
+            letter-spacing: .01em;
             line-height: 1.2;
-            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
         }
 
         .sidebar-section-title.settings {
-            margin-top: 14px;
+            margin-top: 10px;
         }
 
         [data-testid="stSidebar"] div[role="radiogroup"] {
-            gap: 5px;
+            gap: 3px;
             background: transparent;
             border: 0;
         }
 
         [data-testid="stSidebar"] label[data-baseweb="radio"] {
-            min-height: 36px;
+            min-height: 34px;
             margin: 0;
-            padding: 7px 9px;
+            padding: 8px 10px;
             border: 1px solid transparent;
-            border-radius: 7px;
-            color: #d7e0e8 !important;
-            transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+            border-radius: 5px;
+            color: #dce4f2 !important;
+            background: transparent;
+            transition: background 0.15s ease, color 0.15s ease, transform 0.15s ease;
         }
 
         [data-testid="stSidebar"] label[data-baseweb="radio"]:hover {
-            border-color: rgba(22, 184, 196, 0.24);
-            background: rgba(22, 184, 196, 0.18);
+            border-color: transparent;
+            background: rgba(255, 255, 255, 0.08);
             transform: translateX(2px);
         }
 
         [data-testid="stSidebar"] label[data-baseweb="radio"]:has(input:checked) {
-            border-color: rgba(22, 184, 196, 0.48);
-            background: linear-gradient(90deg, rgba(22, 184, 196, 0.28), rgba(255, 255, 255, 0.06));
-            box-shadow: 0 8px 18px rgba(0, 0, 0, 0.12);
+            border-color: #ffffff;
+            background: #ffffff;
+            box-shadow: 0 10px 22px rgba(0, 0, 0, 0.20);
+            transform: none;
         }
 
         [data-testid="stSidebar"] label[data-baseweb="radio"] p {
-            font-size: 13px !important;
-            font-weight: 850 !important;
+            color: #dce4f2 !important;
+            font-size: 12px !important;
+            font-weight: 800 !important;
             line-height: 1.15 !important;
         }
 
+        [data-testid="stSidebar"] label[data-baseweb="radio"]:has(input:checked) p {
+            color: #111827 !important;
+            font-weight: 900 !important;
+        }
+
         [data-testid="stSidebar"] label[data-baseweb="radio"] > div:first-child {
-            margin-right: 7px;
+            display: none;
         }
 
         [data-testid="stSidebar"] div[role="radiogroup"] label[data-baseweb="radio"]:nth-of-type(7) {
             position: relative;
-            margin-top: 38px;
+            margin-top: 33px;
         }
 
         [data-testid="stSidebar"] div[role="radiogroup"] label[data-baseweb="radio"]:nth-of-type(7)::before {
             content: "Ajustes";
             display: block;
             position: absolute;
-            top: -31px;
-            left: 0;
+            top: -24px;
+            left: 4px;
             right: 0;
-            padding: 7px 10px 7px 12px;
-            border-left: 4px solid #16b8c4;
-            border-radius: 6px;
-            background: rgba(255, 255, 255, 0.06);
-            color: #ffffff !important;
-            font-size: 15px;
-            font-weight: 900;
+            padding: 0;
+            border: 0;
+            background: transparent;
+            color: #9aa7bd !important;
+            font-size: 12px;
+            font-weight: 850;
             line-height: 1.2;
             pointer-events: none;
-            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+            box-shadow: none;
         }
 
         [data-testid="stSidebar"] .stButton > button {
             color: #ffffff !important;
-            background: rgba(255, 255, 255, 0.10) !important;
-            border: 1px solid rgba(255, 255, 255, 0.18) !important;
+            background: #263348 !important;
+            border: 1px solid rgba(255, 255, 255, 0.14) !important;
+            border-radius: 6px !important;
             box-shadow: none !important;
         }
 
         [data-testid="stSidebar"] .stButton > button:hover {
             color: #ffffff !important;
-            background: rgba(22, 184, 196, 0.28) !important;
-            border-color: rgba(22, 184, 196, 0.45) !important;
+            background: #334155 !important;
+            border-color: rgba(255, 255, 255, 0.24) !important;
         }
 
         .st-key-payment_destination_card {
