@@ -1588,7 +1588,6 @@ def activar_modulo_admin(modulo):
     st.session_state["modulo_admin_activo"] = modulo
     st.session_state["modulo_admin_selector"] = modulo
     st.query_params["tab"] = modulo
-    st.rerun()
 
 def resolver_modulo_admin(opciones_menu):
     modulo_guardado = st.session_state.get("modulo_admin_activo")
@@ -1804,43 +1803,55 @@ def aplicar_estilos_sistema():
         }
 
         [data-testid="stSidebar"] [data-testid="stAlert"] p {
-            font-size: 11px !important;
+            font-size: 13px !important;
             line-height: 1.2 !important;
         }
 
         .sidebar-section-title {
-            margin: 12px 0 6px 4px;
-            padding: 0;
-            color: #9aa7bd !important;
+            margin: 9px 0 4px 2px;
+            padding: 0 2px;
+            color: #8ea0bb !important;
             font-size: 11px;
             font-weight: 850;
-            letter-spacing: .01em;
-            line-height: 1.2;
+            letter-spacing: .04em;
+            line-height: 1.05;
+            text-transform: uppercase;
         }
 
         .sidebar-section-title.settings {
-            margin-top: 12px;
+            margin-top: 8px;
+        }
+
+        [data-testid="stSidebar"] [class*="st-key-nav_item_"] {
+            margin-bottom: 0 !important;
+        }
+
+        [data-testid="stSidebar"] [class*="st-key-nav_item_"] .stButton,
+        [data-testid="stSidebar"] [class*="st-key-nav_item_"] [data-testid="stButton"] {
+            margin-bottom: 0 !important;
         }
 
         [data-testid="stSidebar"] [class*="st-key-nav_item_"] button {
+            position: relative !important;
             display: flex !important;
             align-items: center !important;
             justify-content: flex-start !important;
             min-height: 30px !important;
             width: 100% !important;
-            margin: 0 0 3px 0 !important;
-            padding: 6px 9px !important;
+            margin: 0 !important;
+            padding: 5px 10px 5px 12px !important;
             border: 1px solid transparent !important;
-            border-radius: 5px !important;
+            border-radius: 6px !important;
             background: transparent !important;
-            color: #dce4f2 !important;
+            color: #d8e1ef !important;
             box-shadow: none !important;
             text-align: left !important;
-            transition: background .15s ease, color .15s ease, transform .15s ease !important;
+            transition: background .16s ease, color .16s ease, transform .16s ease, border-color .16s ease !important;
         }
 
         [data-testid="stSidebar"] [class*="st-key-nav_item_"] button:hover {
-            background: rgba(255, 255, 255, 0.08) !important;
+            background: rgba(255, 255, 255, 0.075) !important;
+            border-color: rgba(255, 255, 255, 0.08) !important;
             color: #ffffff !important;
             transform: translateX(2px);
         }
@@ -1849,9 +1860,20 @@ def aplicar_estilos_sistema():
         [data-testid="stSidebar"] [class*="st-key-nav_item_active_"] button:hover {
             background: #ffffff !important;
             border-color: #ffffff !important;
-            color: #111827 !important;
-            box-shadow: 0 10px 22px rgba(0, 0, 0, 0.20) !important;
+            color: #0f172a !important;
+            box-shadow: 0 12px 26px rgba(0, 0, 0, 0.22) !important;
             transform: none !important;
+        }
+
+        [data-testid="stSidebar"] [class*="st-key-nav_item_active_"] button::before {
+            content: "";
+            position: absolute;
+            left: 0;
+            top: 6px;
+            bottom: 6px;
+            width: 4px;
+            border-radius: 0 4px 4px 0;
+            background: #13b7c6;
         }
 
         [data-testid="stSidebar"] [class*="st-key-nav_item_"] button div,
@@ -1860,9 +1882,9 @@ def aplicar_estilos_sistema():
             width: 100% !important;
             margin: 0 !important;
             color: inherit !important;
-            font-size: 11px !important;
-            font-weight: 800 !important;
-            line-height: 1.15 !important;
+            font-size: 13px !important;
+            font-weight: 760 !important;
+            line-height: 1.05 !important;
             text-align: left !important;
             white-space: nowrap !important;
             overflow: hidden !important;
@@ -1872,7 +1894,7 @@ def aplicar_estilos_sistema():
         [data-testid="stSidebar"] [class*="st-key-nav_item_active_"] button div,
         [data-testid="stSidebar"] [class*="st-key-nav_item_active_"] button p,
         [data-testid="stSidebar"] [class*="st-key-nav_item_active_"] button span {
-            color: #111827 !important;
+            color: #0f172a !important;
             font-weight: 900 !important;
         }
         [data-testid="stSidebar"] .st-key-btn_logout_sidebar button {
@@ -2267,23 +2289,32 @@ else:
             ("Ajustes", opciones_menu[6:]),
         ]
         iconos_sidebar = {
-            opciones_menu[0]: "🛒",
-            opciones_menu[1]: "📦",
-            opciones_menu[2]: "🏊",
-            opciones_menu[3]: "⚽",
-            opciones_menu[4]: "🏢",
-            opciones_menu[5]: "💰",
-            opciones_menu[6]: "👥",
-            opciones_menu[7]: "⚙️",
+            opciones_menu[0]: "01",
+            opciones_menu[1]: "02",
+            opciones_menu[2]: "03",
+            opciones_menu[3]: "04",
+            opciones_menu[4]: "05",
+            opciones_menu[5]: "06",
+            opciones_menu[6]: "07",
+            opciones_menu[7]: "08",
         }
-        etiquetas_sidebar = {opcion: opcion.split(" ", 1)[1] if " " in opcion else opcion for opcion in opciones_menu}
+        etiquetas_sidebar = {
+            opciones_menu[0]: "Ventas y Cocina",
+            opciones_menu[1]: "Control de Stock",
+            opciones_menu[2]: "Control de Piscina",
+            opciones_menu[3]: "Control de Cancha",
+            opciones_menu[4]: "Reservación de Local",
+            opciones_menu[5]: "Caja y Reportes",
+            opciones_menu[6]: "Trabajadores",
+            opciones_menu[7]: "Configuración",
+        }
         for nombre_seccion, opciones_seccion in secciones_sidebar:
             clase_seccion = " settings" if nombre_seccion != "Menú principal" else ""
             st.sidebar.markdown(f"<div class='sidebar-section-title{clase_seccion}'>{nombre_seccion}</div>", unsafe_allow_html=True)
             for opcion_menu in opciones_seccion:
                 idx_menu = opciones_menu.index(opcion_menu)
                 estado_nav = "active" if opcion_menu == modulo_actual else "idle"
-                etiqueta_nav = f"{iconos_sidebar.get(opcion_menu, '')}  {etiquetas_sidebar.get(opcion_menu, opcion_menu)}"
+                etiqueta_nav = f"{iconos_sidebar.get(opcion_menu, '')}    {etiquetas_sidebar.get(opcion_menu, opcion_menu)}"
                 with st.sidebar.container(key=f"nav_item_{estado_nav}_{idx_menu}"):
                     st.button(
                         etiqueta_nav,
