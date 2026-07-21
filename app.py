@@ -1762,49 +1762,59 @@ def aplicar_estilos_sistema():
             border-radius: 8px;
         }
 
+        .sidebar-section-title {
+            margin: 18px 0 8px 0;
+            padding: 7px 10px 7px 12px;
+            border-left: 4px solid #16b8c4;
+            border-radius: 6px;
+            background: rgba(255, 255, 255, 0.06);
+            color: #ffffff !important;
+            font-size: 15px;
+            font-weight: 900;
+            line-height: 1.2;
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+        }
+
+        .sidebar-section-title.settings {
+            margin-top: 14px;
+        }
+
         [data-testid="stSidebar"] div[role="radiogroup"] {
-            gap: 3px;
+            gap: 5px;
             background: transparent;
             border: 0;
         }
 
         [data-testid="stSidebar"] label[data-baseweb="radio"] {
-            min-height: 38px;
+            min-height: 36px;
             margin: 0;
-            padding: 8px 10px;
-            border-radius: 4px;
+            padding: 7px 9px;
+            border: 1px solid transparent;
+            border-radius: 7px;
             color: #d7e0e8 !important;
-            transition: background 0.15s ease;
+            transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
         }
 
         [data-testid="stSidebar"] label[data-baseweb="radio"]:hover {
+            border-color: rgba(22, 184, 196, 0.24);
             background: rgba(22, 184, 196, 0.18);
+            transform: translateX(2px);
+        }
+
+        [data-testid="stSidebar"] label[data-baseweb="radio"]:has(input:checked) {
+            border-color: rgba(22, 184, 196, 0.48);
+            background: linear-gradient(90deg, rgba(22, 184, 196, 0.28), rgba(255, 255, 255, 0.06));
+            box-shadow: 0 8px 18px rgba(0, 0, 0, 0.12);
+        }
+
+        [data-testid="stSidebar"] label[data-baseweb="radio"] p {
+            font-size: 13px !important;
+            font-weight: 850 !important;
+            line-height: 1.15 !important;
         }
 
         [data-testid="stSidebar"] label[data-baseweb="radio"] > div:first-child {
-            display: none;
-        }
-
-        [data-testid="stSidebar"] div[role="radiogroup"] label[data-baseweb="radio"]:nth-of-type(7) {
-            position: relative;
-            margin-top: 38px;
-        }
-
-        [data-testid="stSidebar"] div[role="radiogroup"] label[data-baseweb="radio"]:nth-of-type(7)::before {
-            content: "Ajustes";
-            display: block;
-            position: absolute;
-            top: -31px;
-            left: 0;
-            right: 0;
-            margin: 0;
-            padding: 0;
-            color: #ffffff !important;
-            font-size: 1.17em;
-            font-weight: 800;
-            line-height: 1.4;
-            text-align: left;
-            pointer-events: none;
+            margin-right: 7px;
         }
 
         [data-testid="stSidebar"] .stButton > button {
@@ -2193,7 +2203,7 @@ else:
         for key_menu in ("modulo_admin_principal_selector", "modulo_admin_ajustes_selector"):
             if key_menu in st.session_state:
                 del st.session_state[key_menu]
-        st.sidebar.markdown("### Menú Principal")
+        st.sidebar.markdown("<div class='sidebar-section-title'>Menú Principal</div>", unsafe_allow_html=True)
         st.sidebar.radio(
             "Módulos",
             menu_principal,
@@ -2202,7 +2212,7 @@ else:
             key="modulo_admin_principal_selector",
             on_change=cambiar_modulo_admin_principal
         )
-        st.sidebar.markdown("### Ajustes")
+        st.sidebar.markdown("<div class='sidebar-section-title settings'>Ajustes</div>", unsafe_allow_html=True)
         st.sidebar.radio(
             "Ajustes",
             menu_ajustes,
