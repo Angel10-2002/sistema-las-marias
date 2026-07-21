@@ -9,6 +9,7 @@ import zipfile
 import ast
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 import streamlit.components.v1 as components
 
 # Configuración de página
@@ -20,9 +21,10 @@ ASSETS_DIR = BASE_DIR / "assets"
 BACKUP_DIR = BASE_DIR / "backups"
 METODOS_PAGO = ["Efectivo", "Tarjeta", "Yape José Luis", "Yape Sofia", "PLIN"]
 METODOS_RECAUDADOR = {"Yape José Luis", "Yape Sofia", "PLIN"}
+ZONA_HORARIA_SISTEMA = ZoneInfo("America/Lima")
 
 def ahora_windows():
-    return datetime.now()
+    return datetime.now(ZONA_HORARIA_SISTEMA)
 
 def fecha_hoy_local():
     return ahora_windows().date()
@@ -186,6 +188,34 @@ def asegurar_estructura_db():
                     cursor.execute(f"ALTER TABLE {tabla} ADD COLUMN {nombre_col} {tipo_col}")
                 except:
                     pass
+
+    # Corregir fechas futuras causadas por servidores en UTC (Streamlit Cloud)
+    # cuando el negocio todavía está trabajando en la fecha local de Perú.
+    hoy_sistema = fecha_hoy_local().strftime('%Y-%m-%d')
+    ahora_sistema = fecha_hora_actual()
+    campos_fecha_sistema = [
+        ("inventario", "fecha_ingreso", hoy_sistema),
+        ("stock_movimientos", "fecha", ahora_sistema),
+        ("ventas", "fecha", ahora_sistema),
+        ("detalle_creditos", "fecha", ahora_sistema),
+        ("cocina", "fecha_hora", ahora_sistema),
+        ("cocina", "fecha_entrega", ahora_sistema),
+        ("cocina", "modificado_en", ahora_sistema),
+        ("piscina", "fecha", ahora_sistema),
+        ("historial_cajas", "fecha_cierre", ahora_sistema),
+        ("boletas_liberadas", "fecha_liberacion", ahora_sistema),
+    ]
+    for tabla_fecha, campo_fecha, valor_fecha in campos_fecha_sistema:
+        cursor.execute(f"PRAGMA table_info({tabla_fecha})")
+        columnas_fecha = [col[1] for col in cursor.fetchall()]
+        if campo_fecha in columnas_fecha:
+            try:
+                cursor.execute(
+                    f"UPDATE {tabla_fecha} SET {campo_fecha}=? WHERE {campo_fecha} IS NOT NULL AND substr({campo_fecha},1,10)>?",
+                    (valor_fecha, hoy_sistema)
+                )
+            except:
+                pass
 
     # Registros iniciales por defecto
     cursor.execute("INSERT OR IGNORE INTO usuarios (username, password, rol) VALUES ('administrador', 'admin123', 'Administrador')")
