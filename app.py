@@ -9,7 +9,6 @@ import zipfile
 import ast
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 import streamlit.components.v1 as components
 
@@ -1823,51 +1822,58 @@ def aplicar_estilos_sistema():
             margin-top: 12px;
         }
 
-        .sidebar-nav-link {
-            display: grid;
-            grid-template-columns: 22px minmax(0, 1fr);
-            align-items: center;
-            min-height: 30px;
-            margin: 0 0 3px 0;
-            padding: 6px 9px;
-            border-radius: 5px;
+        [data-testid="stSidebar"] [class*="st-key-nav_item_"] button {
+            display: flex !important;
+            align-items: center !important;
+            justify-content: flex-start !important;
+            min-height: 30px !important;
+            width: 100% !important;
+            margin: 0 0 3px 0 !important;
+            padding: 6px 9px !important;
+            border: 1px solid transparent !important;
+            border-radius: 5px !important;
+            background: transparent !important;
             color: #dce4f2 !important;
-            text-decoration: none !important;
-            font-size: 11px;
-            font-weight: 800;
-            line-height: 1.15;
-            background: transparent;
-            transition: background .15s ease, color .15s ease, transform .15s ease;
+            box-shadow: none !important;
+            text-align: left !important;
+            transition: background .15s ease, color .15s ease, transform .15s ease !important;
         }
 
-        .sidebar-nav-link:hover {
-            background: rgba(255, 255, 255, 0.08);
+        [data-testid="stSidebar"] [class*="st-key-nav_item_"] button:hover {
+            background: rgba(255, 255, 255, 0.08) !important;
             color: #ffffff !important;
             transform: translateX(2px);
         }
 
-        .sidebar-nav-link.active,
-        .sidebar-nav-link.active:hover {
-            background: #ffffff;
+        [data-testid="stSidebar"] [class*="st-key-nav_item_active_"] button,
+        [data-testid="stSidebar"] [class*="st-key-nav_item_active_"] button:hover {
+            background: #ffffff !important;
+            border-color: #ffffff !important;
             color: #111827 !important;
-            box-shadow: 0 10px 22px rgba(0, 0, 0, 0.20);
-            transform: none;
+            box-shadow: 0 10px 22px rgba(0, 0, 0, 0.20) !important;
+            transform: none !important;
         }
 
-        .sidebar-nav-icon {
-            width: 22px;
-            text-align: center;
+        [data-testid="stSidebar"] [class*="st-key-nav_item_"] button div,
+        [data-testid="stSidebar"] [class*="st-key-nav_item_"] button p,
+        [data-testid="stSidebar"] [class*="st-key-nav_item_"] button span {
+            width: 100% !important;
+            margin: 0 !important;
             color: inherit !important;
-            font-size: 12px;
-            line-height: 1;
+            font-size: 11px !important;
+            font-weight: 800 !important;
+            line-height: 1.15 !important;
+            text-align: left !important;
+            white-space: nowrap !important;
+            overflow: hidden !important;
+            text-overflow: ellipsis !important;
         }
 
-        .sidebar-nav-text {
-            min-width: 0;
-            color: inherit !important;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
+        [data-testid="stSidebar"] [class*="st-key-nav_item_active_"] button div,
+        [data-testid="stSidebar"] [class*="st-key-nav_item_active_"] button p,
+        [data-testid="stSidebar"] [class*="st-key-nav_item_active_"] button span {
+            color: #111827 !important;
+            font-weight: 900 !important;
         }
         [data-testid="stSidebar"] .st-key-btn_logout_sidebar button {
             min-height: 32px;
@@ -2257,9 +2263,8 @@ else:
             if key_menu in st.session_state:
                 del st.session_state[key_menu]
         secciones_sidebar = [
-            ("Main Menu", opciones_menu[:3]),
-            ("General", opciones_menu[3:6]),
-            ("Account", opciones_menu[6:]),
+            ("Menú principal", opciones_menu[:6]),
+            ("Ajustes", opciones_menu[6:]),
         ]
         iconos_sidebar = {
             opciones_menu[0]: "🛒",
@@ -2272,26 +2277,21 @@ else:
             opciones_menu[7]: "⚙️",
         }
         etiquetas_sidebar = {opcion: opcion.split(" ", 1)[1] if " " in opcion else opcion for opcion in opciones_menu}
-        query_base_sidebar = dict(st.query_params)
-        query_base_sidebar["usuario"] = st.session_state.get("usuario", "")
-        query_base_sidebar["rol"] = st.session_state.get("rol", "")
         for nombre_seccion, opciones_seccion in secciones_sidebar:
-            clase_seccion = " settings" if nombre_seccion != "Main Menu" else ""
+            clase_seccion = " settings" if nombre_seccion != "Menú principal" else ""
             st.sidebar.markdown(f"<div class='sidebar-section-title{clase_seccion}'>{nombre_seccion}</div>", unsafe_allow_html=True)
             for opcion_menu in opciones_seccion:
-                query_link = query_base_sidebar.copy()
-                query_link["tab"] = opcion_menu
-                href_menu = "?" + urlencode(query_link)
-                clase_activa = " active" if opcion_menu == modulo_actual else ""
-                st.sidebar.markdown(
-                    f"""
-                    <a class='sidebar-nav-link{clase_activa}' href='{href_menu}' target='_self'>
-                        <span class='sidebar-nav-icon'>{iconos_sidebar.get(opcion_menu, '')}</span>
-                        <span class='sidebar-nav-text'>{etiquetas_sidebar.get(opcion_menu, opcion_menu)}</span>
-                    </a>
-                    """,
-                    unsafe_allow_html=True
-                )
+                idx_menu = opciones_menu.index(opcion_menu)
+                estado_nav = "active" if opcion_menu == modulo_actual else "idle"
+                etiqueta_nav = f"{iconos_sidebar.get(opcion_menu, '')}  {etiquetas_sidebar.get(opcion_menu, opcion_menu)}"
+                with st.sidebar.container(key=f"nav_item_{estado_nav}_{idx_menu}"):
+                    st.button(
+                        etiqueta_nav,
+                        key=f"btn_nav_{idx_menu}",
+                        use_container_width=True,
+                        on_click=activar_modulo_admin,
+                        args=(opcion_menu,)
+                    )
         modulo_actual = st.session_state["modulo_admin_activo"]
         if st.sidebar.button("🔓 Cerrar Sesión", type="secondary", use_container_width=True, key="btn_logout_sidebar"):
             logout()
