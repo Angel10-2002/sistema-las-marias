@@ -14,15 +14,24 @@ import streamlit.components.v1 as components
 # Configuración de página
 st.set_page_config(page_title="Complejo Recreativo Las Marías", layout="wide", page_icon="🏊‍♂️", initial_sidebar_state="expanded")
 
-DB_NAME = "complejo.db"
 BASE_DIR = Path(__file__).resolve().parent
+DB_NAME = str(BASE_DIR / "complejo.db")
 ASSETS_DIR = BASE_DIR / "assets"
 BACKUP_DIR = BASE_DIR / "backups"
 METODOS_PAGO = ["Efectivo", "Tarjeta", "Yape José Luis", "Yape Sofia", "PLIN"]
 METODOS_RECAUDADOR = {"Yape José Luis", "Yape Sofia", "PLIN"}
 
+def ahora_windows():
+    return datetime.now()
+
 def fecha_hoy_local():
-    return datetime.now().date()
+    return ahora_windows().date()
+
+def fecha_hora_actual():
+    return ahora_windows().strftime('%Y-%m-%d %H:%M')
+
+def fecha_ticket_actual():
+    return ahora_windows().strftime('%d/%m/%Y %H:%M')
 
 # --- MIGRACIÓN AUTOMÁTICA E INICIALIZACIÓN DE LA BASE DE DATOS ---
 def asegurar_estructura_db():
@@ -263,7 +272,7 @@ def registrar_movimiento_stock(inventario_id, producto, tipo, cantidad, stock_an
     usuario = st.session_state.get("usuario", "Sistema")
     ejecutar_query(
         "INSERT INTO stock_movimientos (inventario_id, producto, tipo, cantidad, stock_anterior, stock_nuevo, fecha, usuario, motivo) VALUES (?,?,?,?,?,?,?,?,?)",
-        (inventario_id, producto, tipo, int(cantidad or 0), int(stock_anterior or 0), int(stock_nuevo or 0), datetime.now().strftime('%Y-%m-%d %H:%M'), usuario, motivo),
+        (inventario_id, producto, tipo, int(cantidad or 0), int(stock_anterior or 0), int(stock_nuevo or 0), fecha_hora_actual(), usuario, motivo),
         commit=True
     )
 
@@ -339,7 +348,7 @@ def calcular_tiempo_entrega(fecha_pedido, fecha_entrega):
         return "Sin dato"
 
 def html_ticket_impresion(cliente, items, total, tipo, vendedor=""):
-    fecha_ticket = datetime.now().strftime('%d/%m/%Y %H:%M')
+    fecha_ticket = fecha_ticket_actual()
     filas = ""
     for item in items:
         filas += f"""
@@ -563,7 +572,7 @@ def recalcular_credito_cliente(cliente):
     elif total > 0:
         ejecutar_query(
             "INSERT INTO ventas (cliente, total, estado, fecha, estado_caja, origen) VALUES (?,?,?,?, 'ABIERTO', 'Cuenta Corriente')",
-            (cliente_normalizado, total, "CREDITO", datetime.now().strftime('%Y-%m-%d %H:%M')),
+            (cliente_normalizado, total, "CREDITO", fecha_hora_actual()),
             commit=True
         )
     return total
@@ -586,7 +595,7 @@ def liquidar_creditos_cliente(cliente, metodo_pago, receptor_tipo, receptor_nomb
     if not detalles:
         return [], 0
 
-    fecha_pago = datetime.now().strftime('%Y-%m-%d %H:%M')
+    fecha_pago = fecha_hora_actual()
     detalles_ventas = [d for d in detalles if (d[5] or "Ventas") == "Ventas"]
     total_ventas = sum(float(d[4] or 0) for d in detalles_ventas)
     total_general = sum(float(d[4] or 0) for d in detalles)
@@ -690,7 +699,7 @@ def sincronizar_cliente_nota(venta_id, cliente_anterior, cliente_nuevo, estado_n
     nuevo = cliente_nuevo.strip().upper() if cliente_nuevo and cliente_nuevo.strip() else anterior
     if not nuevo or nuevo == anterior:
         return anterior
-    fecha_mod = datetime.now().strftime('%Y-%m-%d %H:%M')
+    fecha_mod = fecha_hora_actual()
     ejecutar_query(
         "UPDATE cocina SET cliente=?, modificado_en=CASE WHEN estado='PENDIENTE' THEN ? ELSE modificado_en END WHERE cliente=?",
         (nuevo, fecha_mod, anterior),
@@ -770,7 +779,7 @@ def creditos_abiertos_caja():
     ) or []
 
 def marcar_notificacion_cocina(cliente, descripcion):
-    fecha_mod = datetime.now().strftime('%Y-%m-%d %H:%M')
+    fecha_mod = fecha_hora_actual()
     ejecutar_query(
         "UPDATE cocina SET modificado_en=? WHERE cliente=? AND estado='PENDIENTE'",
         (fecha_mod, cliente),
@@ -943,14 +952,14 @@ def render_panel_cocina_tiempo_real():
     for (cliente_p, fecha_h, mesero_p), data in pedidos_agrupados.items():
         try:
             inicio_dt = datetime.strptime(fecha_h, '%Y-%m-%d %H:%M')
-            ahora_servidor = datetime.now()
+            ahora_servidor = ahora_windows()
             segundos_espera = int((ahora_servidor - inicio_dt).total_seconds())
             inicio_ms = int(inicio_dt.timestamp() * 1000)
             server_now_ms = int(ahora_servidor.timestamp() * 1000)
         except Exception:
             segundos_espera = 0
-            inicio_ms = int(datetime.now().timestamp() * 1000)
-            server_now_ms = int(datetime.now().timestamp() * 1000)
+            inicio_ms = int(ahora_windows().timestamp() * 1000)
+            server_now_ms = int(ahora_windows().timestamp() * 1000)
         color_tiempo = "#16a34a" if segundos_espera < 600 else "#f97316" if segundos_espera < 900 else "#dc2626"
         alerta_tiempo = "<div class='late-alert'>PEDIDO FUERA DE TIEMPO</div>" if segundos_espera >= 900 else ""
         card_id = "cook_" + "_".join(str(x) for x in data["ids"])
@@ -1022,7 +1031,7 @@ def render_panel_cocina_tiempo_real():
         ids_key = "_".join(str(id_item) for id_item in data["ids"])
         with st.container(key=f"entregar_pedido_{ids_key}"):
             if st.button(f"✅ ENTREGAR PEDIDO COMPLETO", key=f"btn_{data['ids']}", help="Marcar este pedido como entregado", use_container_width=True):
-                fecha_entrega = datetime.now().strftime('%Y-%m-%d %H:%M')
+                fecha_entrega = fecha_hora_actual()
                 for id_individual in data['ids']:
                     ejecutar_query("UPDATE cocina SET estado='ENTREGADO', fecha_entrega=? WHERE id=?", (fecha_entrega, id_individual), commit=True)
                 st.rerun()
@@ -1042,7 +1051,7 @@ def render_monitor_cocina_admin_tabla():
         pendientes,
         columns=["ID Pedido", "Cliente / Mesa", "Plato", "Cantidad", "Fecha/Hora", "Mesero"]
     )
-    ahora_servidor = datetime.now()
+    ahora_servidor = ahora_windows()
     parpadeo_rojo = ahora_servidor.second % 2 == 0
 
     def estilo_id_pedido(fila):
@@ -1204,7 +1213,7 @@ def render_modificar_notas(dict_productos):
             if st.button("Agregar a la boleta", use_container_width=True, key="btn_add_prod_nota") and prod_extra:
                 precio_extra = dict_productos[prod_extra]["precio"]
                 subtotal_extra = precio_extra * cant_extra
-                fecha_actual = datetime.now().strftime('%Y-%m-%d %H:%M')
+                fecha_actual = fecha_hora_actual()
                 st.session_state.setdefault("boleta_temp_items", []).append({
                     "id": f"NUEVO-{len(st.session_state.get('boleta_temp_items', [])) + 1}",
                     "producto": prod_extra,
@@ -1227,7 +1236,7 @@ def render_modificar_notas(dict_productos):
                 responsable_pago = nombre_responsable_pago(nuevo_metodo, "Metodo de pago", "")
                 items_temp_guardar = st.session_state.get("boleta_temp_items", [])
                 nuevo_total = sum(float(item.get("subtotal", 0) or 0) for item in items_temp_guardar)
-                fecha_guardado = datetime.now().strftime('%Y-%m-%d %H:%M')
+                fecha_guardado = fecha_hora_actual()
                 if tabla_det == "detalle_creditos":
                     productos_originales_cocina = [p[0] for p in ejecutar_query("SELECT producto FROM detalle_creditos WHERE cliente=?", (cliente_trabajo,), fetch=True) or []]
                 else:
@@ -1379,8 +1388,8 @@ def imagen_css_desde_archivo(ruta, fallback_url):
 
 def crear_backup_base_datos():
     preparar_directorios_sistema()
-    origen = BASE_DIR / DB_NAME
-    marca_tiempo = datetime.now().strftime("%Y%m%d_%H%M%S")
+    origen = Path(DB_NAME)
+    marca_tiempo = ahora_windows().strftime("%Y%m%d_%H%M%S")
     destino = BACKUP_DIR / f"backup_complejo_{marca_tiempo}.db"
     shutil.copy2(origen, destino)
     excel_destino = BACKUP_DIR / f"historial_cajas_{marca_tiempo}.xlsx"
@@ -1407,7 +1416,7 @@ def limpiar_formulario_venta():
 # --- MODAL DE IMPRESIÓN REFORMATEADO Y OPTIMIZADO PARA IMPRESORA TÉRMICA ---
 @st.dialog("📄 Boleto de Venta - LAS MARÍAS")
 def mostrar_ticket_multiple(cliente, items, total, tipo, vendedor=""):
-    fecha_ticket = datetime.now().strftime('%d/%m/%Y %H:%M')
+    fecha_ticket = fecha_ticket_actual()
     
     # Construcción de los items en filas HTML limpias
     lineas_html = ""
@@ -2500,7 +2509,7 @@ else:
                             if not cliente_final or cliente_final == "➕ AGREGAR NUEVO CLIENTE":
                                 st.error("Por favor, ingrese o seleccione un nombre de cliente válido.")
                             else:
-                                fecha_actual = datetime.now().strftime('%Y-%m-%d %H:%M')
+                                fecha_actual = fecha_hora_actual()
                                 
                                 # A. Restar del inventario y mandar a cocina si aplica
                                 for item in st.session_state['carrito']:
@@ -2685,7 +2694,7 @@ else:
                                 precio_extra = dict_productos[prod_extra]["precio"]
                                 subtotal_extra = precio_extra * cant_extra
                                 if estado_actual_nota == "CREDITO":
-                                    ejecutar_query("INSERT INTO detalle_creditos (cliente, producto, cantidad, precio_unitario, subtotal, fecha, origen) VALUES (?,?,?,?,?,?, 'Ventas')", (nuevo_cliente_nota, prod_extra, cant_extra, precio_extra, subtotal_extra, datetime.now().strftime('%Y-%m-%d %H:%M')), commit=True)
+                                    ejecutar_query("INSERT INTO detalle_creditos (cliente, producto, cantidad, precio_unitario, subtotal, fecha, origen) VALUES (?,?,?,?,?,?, 'Ventas')", (nuevo_cliente_nota, prod_extra, cant_extra, precio_extra, subtotal_extra, fecha_hora_actual()), commit=True)
                                     nuevo_total = ejecutar_query("SELECT SUM(subtotal) FROM detalle_creditos WHERE cliente=?", (nuevo_cliente_nota,), fetch=True)[0][0] or 0
                                 else:
                                     ejecutar_query("INSERT INTO detalle_ventas (venta_id, producto, cantidad, precio_unitario, subtotal) VALUES (?,?,?,?,?)", (venta_editar_id, prod_extra, cant_extra, precio_extra, subtotal_extra), commit=True)
@@ -2697,7 +2706,7 @@ else:
                             detalles_guardar = ejecutar_query("SELECT producto, cantidad, subtotal FROM detalle_ventas WHERE venta_id=?", (venta_editar_id,), fetch=True) or []
                             ejecutar_query(
                                 "INSERT INTO boletas_liberadas (venta_id, cliente, total, items, fecha_liberacion, estado) VALUES (?,?,?,?,?, 'LIBERADA')",
-                                (venta_editar_id, cliente_actual_nota, float(venta_label.split('S/. ')[1].split(' ')[0]), str(detalles_guardar), datetime.now().strftime('%Y-%m-%d %H:%M')),
+                                (venta_editar_id, cliente_actual_nota, float(venta_label.split('S/. ')[1].split(' ')[0]), str(detalles_guardar), fecha_hora_actual()),
                                 commit=True
                             )
                             ejecutar_query("UPDATE ventas SET estado_boleta='LIBERADA', estado='LIBERADA', total=0 WHERE id=?", (venta_editar_id,), commit=True)
@@ -2753,10 +2762,12 @@ else:
                         s_precio = st.number_input("Precio de Venta (S/.)", min_value=0.0, step=0.5)
                     with col_s3:
                         s_stock = st.number_input("Cantidad que Ingresa", min_value=1, step=1)
-                        s_fecha = st.date_input(
+                        s_fecha = fecha_hoy_local()
+                        st.text_input(
                             "Fecha de Ingreso",
-                            value=fecha_hoy_local(),
-                            key=f"fecha_ingreso_stock_{st.session_state['stock_registro_nonce']}"
+                            value=s_fecha.strftime('%Y/%m/%d'),
+                            disabled=True,
+                            key=f"fecha_ingreso_stock_windows_{st.session_state['stock_registro_nonce']}"
                         )
                     
                     if st.form_submit_button("Guardar En Inventario", type="primary"):
@@ -2942,7 +2953,7 @@ else:
                         st.error("No se guardó el ingreso porque el monto final supera el pago sugerido.")
                     else:
                         # Registro en base de datos manteniendo el control de caja abierto para los turnos
-                        fecha_registro = datetime.now().strftime('%Y-%m-%d %H:%M')
+                        fecha_registro = fecha_hora_actual()
                         estado_piscina = "CREDITO" if destino_piscina == "Llevar a Cuenta Crédito" else "PAGADO"
                         cliente_piscina_guardar = cliente_credito_piscina.strip().upper() if estado_piscina == "CREDITO" else cliente_piscina
                         ejecutar_query(
@@ -3137,7 +3148,7 @@ else:
                             )
                             cancha_id = ejecutar_query("SELECT max(id) FROM cancha", fetch=True)[0][0]
                             if destino_cancha == "Llevar a Cuenta Crédito" and saldo_cancha > 0:
-                                registrar_credito_cliente(cliente_cancha_guardar, "Cancha", f"SALDO {tipo_cancha_sel}", 1, saldo_cancha, saldo_cancha, datetime.now().strftime('%Y-%m-%d %H:%M'), cancha_id, trabajador_nombre=trabajador_cancha)
+                                registrar_credito_cliente(cliente_cancha_guardar, "Cancha", f"SALDO {tipo_cancha_sel}", 1, saldo_cancha, saldo_cancha, fecha_hora_actual(), cancha_id, trabajador_nombre=trabajador_cancha)
                             st.success("¡Reserva guardada correctamente!")
                             if adelanto_guardar > 0:
                                 it_cancha = [{"producto": f"Alquiler ({tipo_cancha_sel})", "cantidad": 1, "subtotal": adelanto_guardar}]
@@ -3191,7 +3202,7 @@ else:
                                 ejecutar_query("UPDATE cancha SET estado='PAGADO', metodo_pago=?, receptor_tipo=?, receptor_nombre=? WHERE id=?", (metodo_cancha, receptor_cancha, receptor_nombre_cancha, id_cancha_liquidar), commit=True)
                                 ejecutar_query(
                                     "INSERT INTO ventas (cliente, total, estado, fecha, estado_caja, atendido_por_tipo, atendido_por_nombre, metodo_pago, receptor_tipo, receptor_nombre, origen) VALUES (?,?,?,?, 'ABIERTO', ?,?,?,?,?, 'Cancha')",
-                                    (cliente_c, restante, "PAGADO", datetime.now().strftime('%Y-%m-%d %H:%M'), "Trabajador", trabajador_cancha, metodo_cancha, receptor_cancha, receptor_nombre_cancha),
+                                    (cliente_c, restante, "PAGADO", fecha_hora_actual(), "Trabajador", trabajador_cancha, metodo_cancha, receptor_cancha, receptor_nombre_cancha),
                                     commit=True
                                 )
                             else:
@@ -3537,7 +3548,7 @@ else:
                     elif creditos_caja and not mantener_creditos:
                         st.warning("Confirme que desea mantener las cuentas crédito pendientes para el siguiente día.")
                     elif gran_total_caja >= 0:
-                        fecha_cierre_str = datetime.now().strftime('%Y-%m-%d %H:%M')
+                        fecha_cierre_str = fecha_hora_actual()
                         ejecutar_query("INSERT INTO historial_cajas (fecha_cierre, total_vendido, usuario_cierre) VALUES (?,?,?)", (fecha_cierre_str, gran_total_caja, st.session_state['usuario']), commit=True)
                         ultimo_id_res = ejecutar_query("SELECT id FROM historial_cajas ORDER BY id DESC LIMIT 1", fetch=True)
                         id_cierre_actual = ultimo_id_res[0][0] if ultimo_id_res else None
