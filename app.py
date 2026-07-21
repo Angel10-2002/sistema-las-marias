@@ -9,6 +9,7 @@ import zipfile
 import ast
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 import streamlit.components.v1 as components
 
@@ -1759,28 +1760,31 @@ def aplicar_estilos_sistema():
 
         [data-testid="stSidebar"] [data-testid="stImage"] {
             display: flex;
-            justify-content: center;
+            justify-content: flex-start;
             align-items: center;
-            margin-top: 14px;
-            margin-bottom: 10px;
+            margin-top: 8px;
+            margin-bottom: 6px;
             width: 100%;
         }
 
         [data-testid="stSidebar"] img {
             display: block;
-            margin-left: auto;
-            margin-right: auto;
-            padding: 8px;
-            border-radius: 10px;
+            width: 44px !important;
+            height: 44px !important;
+            object-fit: contain;
+            margin-left: 2px;
+            margin-right: 0;
+            padding: 6px;
+            border-radius: 8px;
             background: rgba(255, 255, 255, 0.08);
             box-shadow: 0 12px 28px rgba(0, 0, 0, 0.22);
         }
 
         [data-testid="stSidebar"] h1 {
-            font-size: 22px;
+            font-size: 15px;
             font-weight: 800;
-            text-align: center;
-            margin-bottom: 8px;
+            text-align: left;
+            margin: 4px 0 8px 2px;
         }
 
         [data-testid="stSidebar"] h3 {
@@ -1793,74 +1797,81 @@ def aplicar_estilos_sistema():
         }
 
         [data-testid="stSidebar"] [data-testid="stAlert"] {
-            background: #263348;
-            border: 1px solid rgba(255, 255, 255, 0.10);
-            border-radius: 8px;
+            margin: 0 0 16px 0;
+            padding: 8px 10px;
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 6px;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stAlert"] p {
+            font-size: 11px !important;
+            line-height: 1.2 !important;
         }
 
         .sidebar-section-title {
-            margin: 18px 0 8px 4px;
+            margin: 12px 0 6px 4px;
             padding: 0;
             color: #9aa7bd !important;
-            font-size: 12px;
+            font-size: 11px;
             font-weight: 850;
             letter-spacing: .01em;
             line-height: 1.2;
         }
 
         .sidebar-section-title.settings {
-            margin-top: 10px;
+            margin-top: 12px;
         }
 
-        [data-testid="stSidebar"] [class*="st-key-nav_idle_"] button,
-        [data-testid="stSidebar"] [class*="st-key-nav_active_"] button {
-            min-height: 34px;
-            width: 100%;
+        .sidebar-nav-link {
+            display: grid;
+            grid-template-columns: 22px minmax(0, 1fr);
+            align-items: center;
+            min-height: 30px;
             margin: 0 0 3px 0;
-            padding: 8px 10px;
-            border: 1px solid transparent;
+            padding: 6px 9px;
             border-radius: 5px;
             color: #dce4f2 !important;
+            text-decoration: none !important;
+            font-size: 11px;
+            font-weight: 800;
+            line-height: 1.15;
             background: transparent;
-            box-shadow: none !important;
-            justify-content: flex-start;
-            text-align: left;
-            transition: background 0.15s ease, color 0.15s ease, transform 0.15s ease;
+            transition: background .15s ease, color .15s ease, transform .15s ease;
         }
 
-        [data-testid="stSidebar"] [class*="st-key-nav_idle_"] button:hover {
-            border-color: transparent;
+        .sidebar-nav-link:hover {
             background: rgba(255, 255, 255, 0.08);
             color: #ffffff !important;
             transform: translateX(2px);
         }
 
-        [data-testid="stSidebar"] [class*="st-key-nav_active_"] button,
-        [data-testid="stSidebar"] [class*="st-key-nav_active_"] button:hover {
-            border-color: #ffffff;
+        .sidebar-nav-link.active,
+        .sidebar-nav-link.active:hover {
             background: #ffffff;
             color: #111827 !important;
             box-shadow: 0 10px 22px rgba(0, 0, 0, 0.20);
             transform: none;
         }
 
-        [data-testid="stSidebar"] [class*="st-key-nav_idle_"] button p,
-        [data-testid="stSidebar"] [class*="st-key-nav_idle_"] button span {
-            color: #dce4f2 !important;
-            font-size: 12px !important;
-            font-weight: 800 !important;
-            line-height: 1.15 !important;
+        .sidebar-nav-icon {
+            width: 22px;
+            text-align: center;
+            color: inherit !important;
+            font-size: 12px;
+            line-height: 1;
         }
 
-        [data-testid="stSidebar"] [class*="st-key-nav_active_"] button p,
-        [data-testid="stSidebar"] [class*="st-key-nav_active_"] button span {
-            color: #111827 !important;
-            font-size: 12px !important;
-            font-weight: 900 !important;
-            line-height: 1.2;
+        .sidebar-nav-text {
+            min-width: 0;
+            color: inherit !important;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
-
-        [data-testid="stSidebar"] .stButton > button {
+        [data-testid="stSidebar"] .st-key-btn_logout_sidebar button {
+            min-height: 32px;
+            margin-top: 10px;
             color: #ffffff !important;
             background: #263348 !important;
             border: 1px solid rgba(255, 255, 255, 0.14) !important;
@@ -1868,7 +1879,7 @@ def aplicar_estilos_sistema():
             box-shadow: none !important;
         }
 
-        [data-testid="stSidebar"] .stButton > button:hover {
+        [data-testid="stSidebar"] .st-key-btn_logout_sidebar button:hover {
             color: #ffffff !important;
             background: #334155 !important;
             border-color: rgba(255, 255, 255, 0.24) !important;
@@ -2245,19 +2256,42 @@ else:
         for key_menu in ("modulo_admin_principal_selector", "modulo_admin_ajustes_selector"):
             if key_menu in st.session_state:
                 del st.session_state[key_menu]
-        st.sidebar.markdown("<div class='sidebar-section-title'>Menú Principal</div>", unsafe_allow_html=True)
-        for idx_menu, opcion_menu in enumerate(opciones_menu[:6]):
-            estado_nav = "active" if opcion_menu == modulo_actual else "idle"
-            with st.sidebar.container(key=f"nav_{estado_nav}_{idx_menu}"):
-                if st.button(opcion_menu, key=f"btn_nav_{idx_menu}", use_container_width=True):
-                    activar_modulo_admin(opcion_menu)
-
-        st.sidebar.markdown("<div class='sidebar-section-title settings'>Ajustes</div>", unsafe_allow_html=True)
-        for idx_menu, opcion_menu in enumerate(opciones_menu[6:], start=6):
-            estado_nav = "active" if opcion_menu == modulo_actual else "idle"
-            with st.sidebar.container(key=f"nav_{estado_nav}_{idx_menu}"):
-                if st.button(opcion_menu, key=f"btn_nav_{idx_menu}", use_container_width=True):
-                    activar_modulo_admin(opcion_menu)
+        secciones_sidebar = [
+            ("Main Menu", opciones_menu[:3]),
+            ("General", opciones_menu[3:6]),
+            ("Account", opciones_menu[6:]),
+        ]
+        iconos_sidebar = {
+            opciones_menu[0]: "🛒",
+            opciones_menu[1]: "📦",
+            opciones_menu[2]: "🏊",
+            opciones_menu[3]: "⚽",
+            opciones_menu[4]: "🏢",
+            opciones_menu[5]: "💰",
+            opciones_menu[6]: "👥",
+            opciones_menu[7]: "⚙️",
+        }
+        etiquetas_sidebar = {opcion: opcion.split(" ", 1)[1] if " " in opcion else opcion for opcion in opciones_menu}
+        query_base_sidebar = dict(st.query_params)
+        query_base_sidebar["usuario"] = st.session_state.get("usuario", "")
+        query_base_sidebar["rol"] = st.session_state.get("rol", "")
+        for nombre_seccion, opciones_seccion in secciones_sidebar:
+            clase_seccion = " settings" if nombre_seccion != "Main Menu" else ""
+            st.sidebar.markdown(f"<div class='sidebar-section-title{clase_seccion}'>{nombre_seccion}</div>", unsafe_allow_html=True)
+            for opcion_menu in opciones_seccion:
+                query_link = query_base_sidebar.copy()
+                query_link["tab"] = opcion_menu
+                href_menu = "?" + urlencode(query_link)
+                clase_activa = " active" if opcion_menu == modulo_actual else ""
+                st.sidebar.markdown(
+                    f"""
+                    <a class='sidebar-nav-link{clase_activa}' href='{href_menu}' target='_self'>
+                        <span class='sidebar-nav-icon'>{iconos_sidebar.get(opcion_menu, '')}</span>
+                        <span class='sidebar-nav-text'>{etiquetas_sidebar.get(opcion_menu, opcion_menu)}</span>
+                    </a>
+                    """,
+                    unsafe_allow_html=True
+                )
         modulo_actual = st.session_state["modulo_admin_activo"]
         if st.sidebar.button("🔓 Cerrar Sesión", type="secondary", use_container_width=True, key="btn_logout_sidebar"):
             logout()
