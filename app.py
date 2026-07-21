@@ -21,6 +21,9 @@ BACKUP_DIR = BASE_DIR / "backups"
 METODOS_PAGO = ["Efectivo", "Tarjeta", "Yape José Luis", "Yape Sofia", "PLIN"]
 METODOS_RECAUDADOR = {"Yape José Luis", "Yape Sofia", "PLIN"}
 
+def fecha_hoy_local():
+    return datetime.now().date()
+
 # --- MIGRACIÓN AUTOMÁTICA E INICIALIZACIÓN DE LA BASE DE DATOS ---
 def asegurar_estructura_db():
     conn = sqlite3.connect(DB_NAME)
@@ -2734,6 +2737,8 @@ else:
         # ---------------------------------------------------------------------
         elif modulo_actual == opciones_menu[1]:
             col_st1, col_st2 = st.columns([1.2, 1])
+            if "stock_registro_nonce" not in st.session_state:
+                st.session_state["stock_registro_nonce"] = 0
             
             with col_st1:
                 with st.form("ingreso_stock", clear_on_submit=True):
@@ -2748,7 +2753,11 @@ else:
                         s_precio = st.number_input("Precio de Venta (S/.)", min_value=0.0, step=0.5)
                     with col_s3:
                         s_stock = st.number_input("Cantidad que Ingresa", min_value=1, step=1)
-                        s_fecha = st.date_input("Fecha de Ingreso")
+                        s_fecha = st.date_input(
+                            "Fecha de Ingreso",
+                            value=fecha_hoy_local(),
+                            key=f"fecha_ingreso_stock_{st.session_state['stock_registro_nonce']}"
+                        )
                     
                     if st.form_submit_button("Guardar En Inventario", type="primary"):
                         if s_nombre:
@@ -2763,6 +2772,7 @@ else:
                                 nuevo_id_stock = ejecutar_query("SELECT max(id) FROM inventario", fetch=True)[0][0]
                                 registrar_movimiento_stock(nuevo_id_stock, s_nombre_formato, "REGISTRO", s_stock, 0, s_stock, "Registro inicial")
                                 st.success("Producto registrado.")
+                                st.session_state["stock_registro_nonce"] += 1
                                 st.rerun()
 
             with col_st2:
@@ -3073,7 +3083,7 @@ else:
                 else:
                     c_cliente = st.text_input("Nombre del Cliente", key=f"cliente_cancha_{cancha_nonce}").strip().upper()
                     cliente_credito_cancha = c_cliente
-                c_fecha = st.date_input("Fecha del Alquiler", value=datetime.today(), key=f"fecha_cancha_{cancha_nonce}")
+                c_fecha = st.date_input("Fecha del Alquiler", value=fecha_hoy_local(), key=f"fecha_cancha_{cancha_nonce}")
                 
                 horario_final_str = selector_horario_reserva(f"cancha_{cancha_nonce}")
                 tipo_cancha_sel = st.selectbox("Tipo de Cancha", ["Cancha Mediana 1", "Cancha Mediana 2", "Cancha Grande 3"], key=f"tipo_cancha_{cancha_nonce}")
@@ -3708,7 +3718,7 @@ else:
                 st.subheader("Nueva reservación")
                 cliente_local = st.text_input("Cliente", key=f"txt_cliente_local_{local_nonce}").strip().upper()
                 area_local = st.selectbox("Área", ["Comedor Principal", "Comedor Piscina"], key=f"sb_area_local_{local_nonce}")
-                fecha_local = st.date_input("Fecha de reserva", value=datetime.today(), key=f"fecha_local_{local_nonce}")
+                fecha_local = st.date_input("Fecha de reserva", value=fecha_hoy_local(), key=f"fecha_local_{local_nonce}")
                 horario_local = selector_horario_reserva(f"local_{local_nonce}")
                 tarifa_local_actual = float(tarifas_local.get(area_local, 0.0))
                 monto_local = st.number_input(
