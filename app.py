@@ -1584,18 +1584,6 @@ def cambiar_modulo_admin():
         st.session_state["modulo_admin_activo"] = modulo
         st.query_params["tab"] = modulo
 
-def cambiar_modulo_admin_principal():
-    modulo = st.session_state.get("modulo_admin_principal_selector")
-    if modulo:
-        st.session_state["modulo_admin_activo"] = modulo
-        st.query_params["tab"] = modulo
-
-def cambiar_modulo_admin_ajustes():
-    modulo = st.session_state.get("modulo_admin_ajustes_selector")
-    if modulo:
-        st.session_state["modulo_admin_activo"] = modulo
-        st.query_params["tab"] = modulo
-
 def resolver_modulo_admin(opciones_menu):
     modulo_guardado = st.session_state.get("modulo_admin_activo")
     modulo_url = obtener_parametro_url("tab")
@@ -1857,6 +1845,30 @@ def aplicar_estilos_sistema():
 
         [data-testid="stSidebar"] label[data-baseweb="radio"] > div:first-child {
             margin-right: 7px;
+        }
+
+        [data-testid="stSidebar"] div[role="radiogroup"] label[data-baseweb="radio"]:nth-of-type(7) {
+            position: relative;
+            margin-top: 38px;
+        }
+
+        [data-testid="stSidebar"] div[role="radiogroup"] label[data-baseweb="radio"]:nth-of-type(7)::before {
+            content: "Ajustes";
+            display: block;
+            position: absolute;
+            top: -31px;
+            left: 0;
+            right: 0;
+            padding: 7px 10px 7px 12px;
+            border-left: 4px solid #16b8c4;
+            border-radius: 6px;
+            background: rgba(255, 255, 255, 0.06);
+            color: #ffffff !important;
+            font-size: 15px;
+            font-weight: 900;
+            line-height: 1.2;
+            pointer-events: none;
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
         }
 
         [data-testid="stSidebar"] .stButton > button {
@@ -2240,28 +2252,17 @@ else:
             opciones_menu[7]: "Configuración del Sistema"
         }
         modulo_actual = resolver_modulo_admin(opciones_menu)
-        menu_principal = opciones_menu[:6]
-        menu_ajustes = opciones_menu[6:]
         for key_menu in ("modulo_admin_principal_selector", "modulo_admin_ajustes_selector"):
             if key_menu in st.session_state:
                 del st.session_state[key_menu]
         st.sidebar.markdown("<div class='sidebar-section-title'>Menú Principal</div>", unsafe_allow_html=True)
         st.sidebar.radio(
             "Módulos",
-            menu_principal,
-            index=menu_principal.index(modulo_actual) if modulo_actual in menu_principal else None,
+            opciones_menu,
+            index=opciones_menu.index(modulo_actual) if modulo_actual in opciones_menu else 0,
             label_visibility="collapsed",
-            key="modulo_admin_principal_selector",
-            on_change=cambiar_modulo_admin_principal
-        )
-        st.sidebar.markdown("<div class='sidebar-section-title settings'>Ajustes</div>", unsafe_allow_html=True)
-        st.sidebar.radio(
-            "Ajustes",
-            menu_ajustes,
-            index=menu_ajustes.index(modulo_actual) if modulo_actual in menu_ajustes else None,
-            label_visibility="collapsed",
-            key="modulo_admin_ajustes_selector",
-            on_change=cambiar_modulo_admin_ajustes
+            key="modulo_admin_selector",
+            on_change=cambiar_modulo_admin
         )
         modulo_actual = st.session_state["modulo_admin_activo"]
         if st.sidebar.button("🔓 Cerrar Sesión", type="secondary", use_container_width=True):
