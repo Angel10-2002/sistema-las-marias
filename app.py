@@ -22,6 +22,8 @@ BACKUP_DIR = BASE_DIR / "backups"
 METODOS_PAGO = ["Efectivo", "Tarjeta", "Yape José Luis", "Yape Sofia", "PLIN"]
 METODOS_RECAUDADOR = {"Yape José Luis", "Yape Sofia", "PLIN"}
 ZONA_HORARIA_SISTEMA = ZoneInfo("America/Lima")
+COCINA_VERDE_SEGUNDOS = 20 * 60
+COCINA_ALERTA_SEGUNDOS = 30 * 60
 
 def ahora_windows():
     return datetime.now(ZONA_HORARIA_SISTEMA)
@@ -34,6 +36,10 @@ def fecha_hora_actual():
 
 def fecha_ticket_actual():
     return ahora_windows().strftime('%d/%m/%Y %H:%M')
+
+def parsear_fecha_hora_local(valor):
+    fecha = datetime.strptime(str(valor), "%Y-%m-%d %H:%M")
+    return fecha.replace(tzinfo=ZONA_HORARIA_SISTEMA)
 
 # --- MIGRACIÓN AUTOMÁTICA E INICIALIZACIÓN DE LA BASE DE DATOS ---
 def asegurar_estructura_db():
@@ -305,6 +311,30 @@ def registrar_movimiento_stock(inventario_id, producto, tipo, cantidad, stock_an
         (inventario_id, producto, tipo, int(cantidad or 0), int(stock_anterior or 0), int(stock_nuevo or 0), fecha_hora_actual(), usuario, motivo),
         commit=True
     )
+
+def describir_cantidad_movimiento(tipo, cantidad):
+    tipo_norm = str(tipo or "").upper()
+    cantidad = int(cantidad or 0)
+    if tipo_norm == "AUMENTO":
+        return f"Aumentó +{cantidad}"
+    if tipo_norm in ("DISMINUCION", "DISMINUCIÓN"):
+        return f"Disminuyó -{cantidad}"
+    if tipo_norm == "ELIMINACION":
+        return f"Eliminó {cantidad}"
+    if tipo_norm == "REGISTRO":
+        return f"Ingreso inicial +{cantidad}"
+    return str(cantidad)
+
+def nombre_movimiento_stock(tipo):
+    tipo_norm = str(tipo or "").upper()
+    nombres = {
+        "REGISTRO": "Registro inicial",
+        "AUMENTO": "Aumento de stock",
+        "DISMINUCION": "Disminución de stock",
+        "DISMINUCIÓN": "Disminución de stock",
+        "ELIMINACION": "Eliminación de producto",
+    }
+    return nombres.get(tipo_norm, tipo or "")
 
 def reiniciar_formulario(prefix):
     key = f"{prefix}_form_nonce"
@@ -981,7 +1011,7 @@ def render_panel_cocina_tiempo_real():
 
     for (cliente_p, fecha_h, mesero_p), data in pedidos_agrupados.items():
         try:
-            inicio_dt = datetime.strptime(fecha_h, '%Y-%m-%d %H:%M')
+            inicio_dt = parsear_fecha_hora_local(fecha_h)
             ahora_servidor = ahora_windows()
             segundos_espera = int((ahora_servidor - inicio_dt).total_seconds())
             inicio_ms = int(inicio_dt.timestamp() * 1000)
@@ -990,10 +1020,10 @@ def render_panel_cocina_tiempo_real():
             segundos_espera = 0
             inicio_ms = int(ahora_windows().timestamp() * 1000)
             server_now_ms = int(ahora_windows().timestamp() * 1000)
-        color_tiempo = "#16a34a" if segundos_espera < 600 else "#f97316" if segundos_espera < 900 else "#dc2626"
-        alerta_tiempo = "<div class='late-alert'>PEDIDO FUERA DE TIEMPO</div>" if segundos_espera >= 900 else ""
+        color_tiempo = "#16a34a" if segundos_espera < COCINA_VERDE_SEGUNDOS else "#f97316" if segundos_espera < COCINA_ALERTA_SEGUNDOS else "#dc2626"
+        alerta_tiempo = "<div class='late-alert'>PEDIDO FUERA DE TIEMPO</div>" if segundos_espera >= COCINA_ALERTA_SEGUNDOS else ""
         card_id = "cook_" + "_".join(str(x) for x in data["ids"])
-        animacion_roja = "animation:cocinaBlink 1s infinite;" if segundos_espera >= 900 else ""
+        animacion_roja = "animation:cocinaBlink 1s infinite;" if segundos_espera >= COCINA_ALERTA_SEGUNDOS else ""
         components.html(f"""
         <style>
         @keyframes cocinaBlink {{
@@ -1028,16 +1058,18 @@ def render_panel_cocina_tiempo_real():
                 const syncedNowMs = serverNowMs + (Date.now() - clientRenderMs);
                 const elapsed = Math.max(0, Math.floor((syncedNowMs - startMs) / 1000));
                 const mins = Math.floor(elapsed / 60);
-                const remaining = Math.max(900 - elapsed, 0);
+                const greenLimit = {COCINA_VERDE_SEGUNDOS};
+                const alertLimit = {COCINA_ALERTA_SEGUNDOS};
+                const remaining = Math.max(alertLimit - elapsed, 0);
                 if (remaining > 0) {{
                     main.textContent = pad(Math.floor(remaining / 60)) + ":" + pad(remaining % 60);
                 }} else {{
-                    const lateSecs = elapsed - 900;
+                    const lateSecs = elapsed - alertLimit;
                     main.textContent = "+" + pad(Math.floor(lateSecs / 60)) + ":" + pad(lateSecs % 60);
                 }}
                 sub.textContent = mins + " min transcurridos";
-                const vencido = elapsed >= 900;
-                const color = elapsed < 600 ? "#16a34a" : elapsed < 900 ? "#f97316" : "#dc2626";
+                const vencido = elapsed >= alertLimit;
+                const color = elapsed < greenLimit ? "#16a34a" : elapsed < alertLimit ? "#f97316" : "#dc2626";
                 card.style.backgroundColor = color;
                 card.style.animation = vencido ? "cocinaBlink 1s infinite" : "none";
                 let late = card.querySelector(".late-alert");
@@ -1087,21 +1119,21 @@ def render_monitor_cocina_admin_tabla():
     def estilo_id_pedido(fila):
         estilos = [""] * len(fila)
         try:
-            inicio = datetime.strptime(str(fila["Fecha/Hora"]), "%Y-%m-%d %H:%M")
+            inicio = parsear_fecha_hora_local(fila["Fecha/Hora"])
             segundos = int((ahora_servidor - inicio).total_seconds())
         except Exception:
             segundos = 0
-        if segundos < 600:
+        if segundos < COCINA_VERDE_SEGUNDOS:
             color = "#16a34a"
-        elif segundos < 900:
+        elif segundos < COCINA_ALERTA_SEGUNDOS:
             color = "#f97316"
             texto = "white"
         else:
             color = "#dc2626" if parpadeo_rojo else "#ffffff"
             texto = "white" if parpadeo_rojo else "#dc2626"
-        if segundos < 600:
+        if segundos < COCINA_VERDE_SEGUNDOS:
             texto = "white"
-        borde = "2px solid #dc2626" if segundos >= 900 and not parpadeo_rojo else "1px solid #dc2626"
+        borde = "2px solid #dc2626" if segundos >= COCINA_ALERTA_SEGUNDOS and not parpadeo_rojo else "1px solid #dc2626"
         estilos[0] = f"background-color: {color}; color: {texto}; font-weight: 900; border: {borde};"
         return estilos
 
@@ -2939,6 +2971,7 @@ else:
                                     st.error("Ingrese un nombre válido para el producto.")
                         with col_btn2:
                             if st.button("❌ Eliminar Producto", type="secondary", use_container_width=True):
+                                registrar_movimiento_stock(id_edit, nom_edit, "ELIMINACION", stock_edit, stock_edit, 0, "Producto eliminado del inventario")
                                 ejecutar_query("DELETE FROM inventario WHERE id=?", (id_edit,), commit=True)
                                 st.warning("¡Producto eliminado!")
                                 st.rerun()
@@ -2956,8 +2989,20 @@ else:
                     fetch=True
                 )
                 if movimientos_stock:
+                    df_movimientos_stock = pd.DataFrame(
+                        movimientos_stock,
+                        columns=["Fecha", "Usuario", "Producto", "Movimiento", "Cantidad", "Stock anterior", "Stock nuevo", "Motivo"]
+                    )
+                    df_movimientos_stock["Detalle de cantidad"] = df_movimientos_stock.apply(
+                        lambda fila: describir_cantidad_movimiento(fila["Movimiento"], fila["Cantidad"]),
+                        axis=1
+                    )
+                    df_movimientos_stock["Movimiento"] = df_movimientos_stock["Movimiento"].map(nombre_movimiento_stock)
+                    df_movimientos_stock = df_movimientos_stock[
+                        ["Fecha", "Usuario", "Producto", "Movimiento", "Detalle de cantidad", "Stock anterior", "Stock nuevo", "Motivo"]
+                    ]
                     st.dataframe(
-                        pd.DataFrame(movimientos_stock, columns=["Fecha", "Usuario", "Producto", "Movimiento", "Cantidad", "Stock anterior", "Stock nuevo", "Motivo"]),
+                        df_movimientos_stock,
                         use_container_width=True,
                         hide_index=True
                     )
