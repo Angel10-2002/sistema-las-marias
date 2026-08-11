@@ -105,7 +105,7 @@ def parsear_fecha_hora_local(valor):
 def obtener_pool_postgres(database_url):
     if psycopg2_pool is None:
         raise RuntimeError("Falta instalar psycopg2-binary para usar PostgreSQL en Streamlit Cloud.")
-    return psycopg2_pool.SimpleConnectionPool(1, 8, database_url, connect_timeout=12, options="-c search_path=public")
+    return psycopg2_pool.SimpleConnectionPool(1, 8, database_url, connect_timeout=12)
 
 def conectar_db():
     if DB_BACKEND == "postgres":
