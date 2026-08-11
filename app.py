@@ -7,10 +7,17 @@ import mimetypes
 import shutil
 import zipfile
 import ast
+import os
+import re
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 import streamlit.components.v1 as components
+
+try:
+    import psycopg2
+except ImportError:
+    psycopg2 = None
 
 # Configuración de página
 st.set_page_config(page_title="Complejo Recreativo Las Marías", layout="wide", page_icon="🏊‍♂️", initial_sidebar_state="expanded")
@@ -25,6 +32,15 @@ METODOS_RECAUDADOR = {"Yape José Luis", "Yape Sofia", "PLIN"}
 ZONA_HORARIA_SISTEMA = ZoneInfo("America/Lima")
 COCINA_VERDE_SEGUNDOS = 20 * 60
 COCINA_ALERTA_SEGUNDOS = 30 * 60
+
+def obtener_database_url():
+    try:
+        return st.secrets.get("DATABASE_URL", "")
+    except Exception:
+        return os.environ.get("DATABASE_URL", "")
+
+DATABASE_URL = obtener_database_url()
+DB_BACKEND = "postgres" if DATABASE_URL else "sqlite"
 
 def ahora_windows():
     return datetime.now(ZONA_HORARIA_SISTEMA)
@@ -42,8 +58,84 @@ def parsear_fecha_hora_local(valor):
     fecha = datetime.strptime(str(valor), "%Y-%m-%d %H:%M")
     return fecha.replace(tzinfo=ZONA_HORARIA_SISTEMA)
 
+def conectar_db():
+    if DB_BACKEND == "postgres":
+        if psycopg2 is None:
+            raise RuntimeError("Falta instalar psycopg2-binary para usar PostgreSQL en Streamlit Cloud.")
+        return psycopg2.connect(DATABASE_URL)
+    return sqlite3.connect(DB_NAME)
+
+def ejecutar_sql_directo(cursor, query, params=()):
+    if DB_BACKEND == "postgres":
+        cursor.execute(adaptar_sql_postgres(query), params)
+    else:
+        cursor.execute(query, params)
+
+def adaptar_sql_postgres(query):
+    q = query
+    q = q.replace("?", "%s")
+    q = re.sub(r"INSERT\s+OR\s+IGNORE\s+INTO\s+(.+?)\s+VALUES", r"INSERT INTO \1 VALUES", q, flags=re.IGNORECASE | re.DOTALL)
+    q = re.sub(r"INSERT\s+OR\s+IGNORE\s+INTO\s+(.+?)\)\s+VALUES", r"INSERT INTO \1) VALUES", q, flags=re.IGNORECASE | re.DOTALL)
+    if re.match(r"\s*INSERT\s+INTO\s+", q, flags=re.IGNORECASE) and "ON CONFLICT" not in q.upper():
+        original_upper = query.upper()
+        if "INSERT OR IGNORE" in original_upper:
+            q = q.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
+    return q
+
+def ejecutar_upsert_postgres(cursor, tabla, columnas, valores, conflicto):
+    cols = ", ".join(columnas)
+    marcas = ", ".join(["%s"] * len(columnas))
+    updates = ", ".join([f"{col}=EXCLUDED.{col}" for col in columnas if col not in conflicto])
+    conflict_cols = ", ".join(conflicto)
+    if updates:
+        sql = f"INSERT INTO {tabla} ({cols}) VALUES ({marcas}) ON CONFLICT ({conflict_cols}) DO UPDATE SET {updates}"
+    else:
+        sql = f"INSERT INTO {tabla} ({cols}) VALUES ({marcas}) ON CONFLICT ({conflict_cols}) DO NOTHING"
+    cursor.execute(sql, valores)
+
+def asegurar_estructura_db_postgres():
+    conn = conectar_db()
+    cursor = conn.cursor()
+    tablas_sql = [
+        """CREATE TABLE IF NOT EXISTS usuarios (id SERIAL PRIMARY KEY, username TEXT UNIQUE, password TEXT, rol TEXT, login_token TEXT)""",
+        """CREATE TABLE IF NOT EXISTS inventario (id SERIAL PRIMARY KEY, nombre TEXT UNIQUE, proveedor TEXT, fecha_ingreso TEXT, costo REAL, precio REAL, stock INTEGER)""",
+        """CREATE TABLE IF NOT EXISTS detalle_creditos (id SERIAL PRIMARY KEY, cliente TEXT, producto TEXT, cantidad INTEGER, precio_unitario REAL, subtotal REAL, fecha TEXT, origen TEXT DEFAULT 'Ventas', referencia_id INTEGER, mesero_nombre TEXT, trabajador_nombre TEXT)""",
+        """CREATE TABLE IF NOT EXISTS cocina (id SERIAL PRIMARY KEY, cliente TEXT, plato TEXT, cantidad INTEGER, fecha_hora TEXT, estado TEXT, fecha_entrega TEXT, modificado_en TEXT, mesero_nombre TEXT)""",
+        """CREATE TABLE IF NOT EXISTS tarifas (categoria TEXT PRIMARY KEY, precio REAL)""",
+        """CREATE TABLE IF NOT EXISTS tarifas_cancha (tipo TEXT PRIMARY KEY, precio REAL)""",
+        """CREATE TABLE IF NOT EXISTS configuracion (clave TEXT PRIMARY KEY, valor TEXT)""",
+        """CREATE TABLE IF NOT EXISTS trabajadores (id SERIAL PRIMARY KEY, nombre TEXT UNIQUE, rol TEXT, asistio_hoy TEXT DEFAULT 'SI', activo INTEGER DEFAULT 1)""",
+        """CREATE TABLE IF NOT EXISTS tarifas_local (area TEXT PRIMARY KEY, precio REAL)""",
+        """CREATE TABLE IF NOT EXISTS reservas_local (id SERIAL PRIMARY KEY, cliente TEXT, area TEXT, fecha_reserva TEXT, horario TEXT, monto_total REAL, estado TEXT, metodo_pago TEXT, receptor_tipo TEXT, receptor_nombre TEXT, trabajador TEXT, estado_caja TEXT DEFAULT 'ABIERTO', id_cierre INTEGER)""",
+        """CREATE TABLE IF NOT EXISTS boletas_liberadas (id SERIAL PRIMARY KEY, venta_id INTEGER, cliente TEXT, total REAL, items TEXT, fecha_liberacion TEXT, estado TEXT DEFAULT 'LIBERADA')""",
+        """CREATE TABLE IF NOT EXISTS stock_movimientos (id SERIAL PRIMARY KEY, inventario_id INTEGER, producto TEXT, tipo TEXT, cantidad INTEGER, stock_anterior INTEGER, stock_nuevo INTEGER, fecha TEXT, usuario TEXT, motivo TEXT)""",
+        """CREATE TABLE IF NOT EXISTS piscina (id SERIAL PRIMARY KEY, ninos INTEGER, adultos INTEGER, mayores INTEGER, monto_pagado REAL, fecha TEXT, estado_caja TEXT DEFAULT 'ABIERTO', id_cierre INTEGER, cliente TEXT DEFAULT 'CLIENTE PISCINA', metodo_pago TEXT DEFAULT 'Efectivo', receptor_tipo TEXT DEFAULT 'Caja Chica', receptor_nombre TEXT, trabajador TEXT, destino TEXT DEFAULT 'PAGADO', estado TEXT DEFAULT 'PAGADO')""",
+        """CREATE TABLE IF NOT EXISTS ventas (id SERIAL PRIMARY KEY, cliente TEXT, total REAL, estado TEXT, fecha TEXT, estado_caja TEXT DEFAULT 'ABIERTO', id_cierre INTEGER, atendido_por_tipo TEXT, atendido_por_nombre TEXT, metodo_pago TEXT DEFAULT 'Efectivo', receptor_tipo TEXT DEFAULT 'Caja Chica', receptor_nombre TEXT, origen TEXT DEFAULT 'Ventas', estado_boleta TEXT DEFAULT 'ACTIVA', observaciones TEXT)""",
+        """CREATE TABLE IF NOT EXISTS detalle_ventas (id SERIAL PRIMARY KEY, venta_id INTEGER, producto TEXT, cantidad INTEGER, precio_unitario REAL, subtotal REAL)""",
+        """CREATE TABLE IF NOT EXISTS historial_cajas (id SERIAL PRIMARY KEY, fecha_cierre TEXT, total_vendido REAL, usuario_cierre TEXT)""",
+        """CREATE TABLE IF NOT EXISTS cancha (id SERIAL PRIMARY KEY, cliente TEXT, fecha_reserva TEXT, horario TEXT, tipo_cancha TEXT, monto_total REAL, adelanto REAL, estado TEXT, estado_caja TEXT DEFAULT 'ABIERTO', id_cierre INTEGER, metodo_pago TEXT DEFAULT 'Efectivo', receptor_tipo TEXT DEFAULT 'Caja Chica', receptor_nombre TEXT, trabajador TEXT)""",
+        """CREATE TABLE IF NOT EXISTS pagos_caja (id SERIAL PRIMARY KEY, origen TEXT, referencia_id INTEGER, cliente TEXT, metodo_pago TEXT, monto REAL, fecha TEXT, usuario TEXT, estado_caja TEXT DEFAULT 'ABIERTO', id_cierre INTEGER, observacion TEXT)""",
+        """CREATE UNIQUE INDEX IF NOT EXISTS ux_pagos_caja_unicos ON pagos_caja (origen, referencia_id, metodo_pago, monto)"""
+    ]
+    for sql in tablas_sql:
+        cursor.execute(sql)
+
+    ejecutar_upsert_postgres(cursor, "usuarios", ["username", "password", "rol"], ("administrador", "admin123", "Administrador"), ["username"])
+    ejecutar_upsert_postgres(cursor, "usuarios", ["username", "password", "rol"], ("cocinero", "cocina123", "Cocinero"), ["username"])
+    for categoria, precio in [("Niños", 5.0), ("Adultos", 10.0), ("Mayores", 7.0)]:
+        ejecutar_upsert_postgres(cursor, "tarifas", ["categoria", "precio"], (categoria, precio), ["categoria"])
+    for tipo, precio in [("Cancha Grande", 70.0), ("Cancha Grande 3", 70.0), ("Media Cancha", 40.0), ("Cancha Mediana 1", 40.0), ("Cancha Mediana 2", 40.0)]:
+        ejecutar_upsert_postgres(cursor, "tarifas_cancha", ["tipo", "precio"], (tipo, precio), ["tipo"])
+    for area, precio in [("Comedor Principal", 0.0), ("Comedor Piscina", 0.0)]:
+        ejecutar_upsert_postgres(cursor, "tarifas_local", ["area", "precio"], (area, precio), ["area"])
+    conn.commit()
+    conn.close()
+
 # --- MIGRACIÓN AUTOMÁTICA E INICIALIZACIÓN DE LA BASE DE DATOS ---
 def asegurar_estructura_db():
+    if DB_BACKEND == "postgres":
+        asegurar_estructura_db_postgres()
+        return
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     
@@ -363,10 +455,39 @@ def asegurar_estructura_db():
 
 asegurar_estructura_db()
 
+def preparar_query_runtime(query, params=()):
+    if DB_BACKEND != "postgres":
+        return query, params
+    q = query.strip()
+    upper = q.upper()
+    if upper.startswith("INSERT OR REPLACE INTO"):
+        match = re.match(r"INSERT\s+OR\s+REPLACE\s+INTO\s+(\w+)\s*\((.*?)\)\s+VALUES\s*\((.*?)\)", q, re.IGNORECASE | re.DOTALL)
+        if match:
+            tabla = match.group(1)
+            columnas = [col.strip() for col in match.group(2).split(",")]
+            conflicto_por_tabla = {
+                "configuracion": ["clave"],
+                "tarifas_cancha": ["tipo"],
+                "tarifas_local": ["area"],
+                "trabajadores": ["nombre"],
+            }
+            conflicto = conflicto_por_tabla.get(tabla)
+            if conflicto:
+                cols = ", ".join(columnas)
+                marcas = ", ".join(["%s"] * len(columnas))
+                updates = ", ".join([f"{col}=EXCLUDED.{col}" for col in columnas if col not in conflicto])
+                if updates:
+                    query_pg = f"INSERT INTO {tabla} ({cols}) VALUES ({marcas}) ON CONFLICT ({', '.join(conflicto)}) DO UPDATE SET {updates}"
+                else:
+                    query_pg = f"INSERT INTO {tabla} ({cols}) VALUES ({marcas}) ON CONFLICT ({', '.join(conflicto)}) DO NOTHING"
+                return query_pg, params
+    return adaptar_sql_postgres(query), params
+
 def ejecutar_query(query, params=(), fetch=False, commit=False):
-    conn = sqlite3.connect(DB_NAME)
+    conn = conectar_db()
     cursor = conn.cursor()
-    cursor.execute(query, params)
+    query_preparada, params_preparados = preparar_query_runtime(query, params)
+    cursor.execute(query_preparada, params_preparados)
     res = None
     if fetch:
         res = cursor.fetchall()
@@ -990,15 +1111,20 @@ def operaciones_pendientes_caja():
     return pendientes
 
 def creditos_abiertos_caja():
+    agregador_origenes = (
+        "STRING_AGG(DISTINCT COALESCE(NULLIF(TRIM(dc.origen),''),'Ventas'), ',')"
+        if DB_BACKEND == "postgres"
+        else "GROUP_CONCAT(DISTINCT COALESCE(NULLIF(TRIM(dc.origen),''),'Ventas'))"
+    )
     return ejecutar_query(
-        """
+        f"""
         SELECT
             'Crédito' AS tipo,
             v.id,
             v.cliente,
             COALESCE(v.total,0),
             COALESCE((
-                SELECT GROUP_CONCAT(DISTINCT COALESCE(NULLIF(TRIM(dc.origen),''),'Ventas'))
+                SELECT {agregador_origenes}
                 FROM detalle_creditos dc
                 WHERE dc.cliente=v.cliente
             ), COALESCE(NULLIF(TRIM(v.origen),''),'Ventas')) AS modulo,
@@ -3671,15 +3797,20 @@ else:
             with cm4: 
                 st.markdown(f"<div style='background-color:#1E6F5C; padding:10px; border-radius:10px; text-align:center;'><h3 style='color:white; margin:0;'>TOTAL EN CAJA</h3><h2 style='color:white; margin:0;'>S/. {gran_total_caja:.2f}</h2></div>", unsafe_allow_html=True)
             with st.expander("Detalle de ingresos"):
+                detalle_metodos_sql = (
+                    "STRING_AGG(metodo_pago || ' S/. ' || TO_CHAR(monto, 'FM999999990.00'), ' | ') AS metodo_pago"
+                    if DB_BACKEND == "postgres"
+                    else "GROUP_CONCAT(metodo_pago || ' S/. ' || printf('%.2f', monto), ' | ') AS metodo_pago"
+                )
                 detalle_ingresos = ejecutar_query(
-                    """
+                    f"""
                     SELECT
                         origen,
                         referencia_id,
                         cliente,
                         MAX(fecha) AS fecha,
                         SUM(monto) AS total,
-                        GROUP_CONCAT(metodo_pago || ' S/. ' || printf('%.2f', monto), ' | ') AS metodo_pago
+                        {detalle_metodos_sql}
                     FROM pagos_caja
                     WHERE estado_caja='ABIERTO'
                     GROUP BY origen, referencia_id, cliente
