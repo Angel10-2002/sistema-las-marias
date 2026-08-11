@@ -19,7 +19,8 @@ BASE_DIR = Path(__file__).resolve().parent
 DB_NAME = str(BASE_DIR / "complejo.db")
 ASSETS_DIR = BASE_DIR / "assets"
 BACKUP_DIR = BASE_DIR / "backups"
-METODOS_PAGO = ["Efectivo", "Tarjeta", "Yape José Luis", "Yape Sofia", "PLIN"]
+METODOS_PAGO_BASE = ["Efectivo", "Tarjeta", "Yape José Luis", "Yape Sofia", "PLIN"]
+METODOS_PAGO = METODOS_PAGO_BASE + ["Pago Mixto"]
 METODOS_RECAUDADOR = {"Yape José Luis", "Yape Sofia", "PLIN"}
 ZONA_HORARIA_SISTEMA = ZoneInfo("America/Lima")
 COCINA_VERDE_SEGUNDOS = 20 * 60
@@ -58,6 +59,22 @@ def asegurar_estructura_db():
     cursor.execute('''CREATE TABLE IF NOT EXISTS reservas_local (id INTEGER PRIMARY KEY AUTOINCREMENT, cliente TEXT, area TEXT, fecha_reserva TEXT, horario TEXT, monto_total REAL, estado TEXT, metodo_pago TEXT, receptor_tipo TEXT, receptor_nombre TEXT, trabajador TEXT, estado_caja TEXT DEFAULT 'ABIERTO', id_cierre INTEGER)''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS boletas_liberadas (id INTEGER PRIMARY KEY AUTOINCREMENT, venta_id INTEGER, cliente TEXT, total REAL, items TEXT, fecha_liberacion TEXT, estado TEXT DEFAULT 'LIBERADA')''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS stock_movimientos (id INTEGER PRIMARY KEY AUTOINCREMENT, inventario_id INTEGER, producto TEXT, tipo TEXT, cantidad INTEGER, stock_anterior INTEGER, stock_nuevo INTEGER, fecha TEXT, usuario TEXT, motivo TEXT)''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS pagos_caja (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            origen TEXT,
+            referencia_id INTEGER,
+            cliente TEXT,
+            metodo_pago TEXT,
+            monto REAL,
+            fecha TEXT,
+            usuario TEXT,
+            estado_caja TEXT DEFAULT 'ABIERTO',
+            id_cierre INTEGER,
+            observacion TEXT,
+            UNIQUE(origen, referencia_id, metodo_pago, monto)
+        )
+    ''')
     
     # Tabla piscina con estado_caja para permitir el reinicio correcto en los cierres
     cursor.execute('''
@@ -210,6 +227,7 @@ def asegurar_estructura_db():
         ("piscina", "fecha", ahora_sistema),
         ("historial_cajas", "fecha_cierre", ahora_sistema),
         ("boletas_liberadas", "fecha_liberacion", ahora_sistema),
+        ("pagos_caja", "fecha", ahora_sistema),
     ]
     for tabla_fecha, campo_fecha, valor_fecha in campos_fecha_sistema:
         cursor.execute(f"PRAGMA table_info({tabla_fecha})")
@@ -222,6 +240,59 @@ def asegurar_estructura_db():
                 )
             except:
                 pass
+
+    # Migrar ingresos existentes a la tabla central de pagos sin duplicarlos.
+    cursor.execute(
+        """
+        INSERT OR IGNORE INTO pagos_caja (origen, referencia_id, cliente, metodo_pago, monto, fecha, usuario, estado_caja, id_cierre, observacion)
+        SELECT 'Ventas', id, cliente, COALESCE(NULLIF(TRIM(metodo_pago),''),'Efectivo'), COALESCE(total,0), fecha, 'Migracion',
+               COALESCE(estado_caja,'ABIERTO'), id_cierre, 'Migrado desde ventas'
+        FROM ventas
+        WHERE estado='PAGADO'
+          AND COALESCE(estado_boleta,'ACTIVA')!='LIBERADA'
+          AND COALESCE(total,0)>0
+        """
+    )
+    cursor.execute(
+        """
+        INSERT OR IGNORE INTO pagos_caja (origen, referencia_id, cliente, metodo_pago, monto, fecha, usuario, estado_caja, id_cierre, observacion)
+        SELECT 'Piscina', id, cliente, COALESCE(NULLIF(TRIM(metodo_pago),''),'Efectivo'), COALESCE(monto_pagado,0), fecha, 'Migracion',
+               COALESCE(estado_caja,'ABIERTO'), id_cierre, 'Migrado desde piscina'
+        FROM piscina
+        WHERE estado='PAGADO'
+          AND COALESCE(monto_pagado,0)>0
+        """
+    )
+    cursor.execute(
+        """
+        INSERT OR IGNORE INTO pagos_caja (origen, referencia_id, cliente, metodo_pago, monto, fecha, usuario, estado_caja, id_cierre, observacion)
+        SELECT 'Cancha - Adelanto', id, cliente, COALESCE(NULLIF(TRIM(metodo_pago),''),'Efectivo'), COALESCE(adelanto,0),
+               fecha_reserva || ' ' || horario, 'Migracion', COALESCE(estado_caja,'ABIERTO'), id_cierre, 'Migrado desde adelanto de cancha'
+        FROM cancha
+        WHERE estado!='ELIMINADA'
+          AND COALESCE(adelanto,0)>0
+        """
+    )
+    cursor.execute(
+        """
+        INSERT OR IGNORE INTO pagos_caja (origen, referencia_id, cliente, metodo_pago, monto, fecha, usuario, estado_caja, id_cierre, observacion)
+        SELECT 'Cancha - Saldo', id, cliente, COALESCE(NULLIF(TRIM(metodo_pago),''),'Efectivo'), COALESCE(monto_total,0) - COALESCE(adelanto,0),
+               fecha_reserva || ' ' || horario, 'Migracion', COALESCE(estado_caja,'ABIERTO'), id_cierre, 'Migrado desde saldo de cancha'
+        FROM cancha
+        WHERE estado='PAGADO'
+          AND (COALESCE(monto_total,0) - COALESCE(adelanto,0))>0
+        """
+    )
+    cursor.execute(
+        """
+        INSERT OR IGNORE INTO pagos_caja (origen, referencia_id, cliente, metodo_pago, monto, fecha, usuario, estado_caja, id_cierre, observacion)
+        SELECT 'Reserva de Local', id, cliente, COALESCE(NULLIF(TRIM(metodo_pago),''),'Efectivo'), COALESCE(monto_total,0),
+               fecha_reserva || ' ' || horario, 'Migracion', COALESCE(estado_caja,'ABIERTO'), id_cierre, 'Migrado desde reserva de local'
+        FROM reservas_local
+        WHERE estado='PAGADO'
+          AND COALESCE(monto_total,0)>0
+        """
+    )
 
     # Registros iniciales por defecto
     cursor.execute("INSERT OR IGNORE INTO usuarios (username, password, rol) VALUES ('administrador', 'admin123', 'Administrador')")
@@ -368,12 +439,120 @@ def seleccionar_trabajador(label, roles=("Mesero", "Trabajador"), key_prefix="tr
     rol = elegido.rsplit("(", 1)[1].replace(")", "")
     return rol, nombre
 
-def seleccionar_pago_receptor(key_prefix, incluir_mesero=True, receptor_preseleccionado=None):
+def normalizar_monto(valor):
+    return round(float(valor or 0), 2)
+
+def pagos_normales_para(total, metodo_pago):
+    return [{"metodo_pago": metodo_pago or "Efectivo", "monto": normalizar_monto(total)}]
+
+def validar_pagos_mixtos(total, pagos):
+    total_objetivo = normalizar_monto(total)
+    total_asignado = normalizar_monto(sum(normalizar_monto(p.get("monto", 0)) for p in pagos))
+    pendiente = normalizar_monto(total_objetivo - total_asignado)
+    return abs(pendiente) <= 0.01, total_asignado, pendiente
+
+def obtener_detalle_pago(key_prefix, total, metodo_pago):
+    total = normalizar_monto(total)
+    if metodo_pago != "Pago Mixto":
+        return pagos_normales_para(total, metodo_pago), True
+    pagos = st.session_state.get(f"{key_prefix}_pagos_mixtos", [])
+    pagos_limpios = []
+    for pago in pagos:
+        metodo = pago.get("metodo_pago")
+        monto = normalizar_monto(pago.get("monto", 0))
+        if metodo in METODOS_PAGO_BASE and monto > 0:
+            pagos_limpios.append({"metodo_pago": metodo, "monto": monto})
+    valido, _, _ = validar_pagos_mixtos(total, pagos_limpios)
+    return pagos_limpios, valido
+
+def registrar_pagos_caja(origen, referencia_id, cliente, total, metodo_pago, pagos_detalle=None, estado_caja="ABIERTO", id_cierre=None, observacion=""):
+    total = normalizar_monto(total)
+    if total <= 0:
+        return
+    pagos_detalle = pagos_detalle or pagos_normales_para(total, metodo_pago)
+    pagos_agrupados = {}
+    for pago in pagos_detalle:
+        metodo = pago.get("metodo_pago", "Efectivo")
+        pagos_agrupados[metodo] = normalizar_monto(pagos_agrupados.get(metodo, 0) + normalizar_monto(pago.get("monto", 0)))
+    pagos_detalle = [{"metodo_pago": metodo, "monto": monto} for metodo, monto in pagos_agrupados.items() if monto > 0]
+    valido, total_asignado, pendiente = validar_pagos_mixtos(total, pagos_detalle)
+    if not valido:
+        raise ValueError(f"El pago no cuadra. Asignado S/. {total_asignado:.2f}, pendiente S/. {pendiente:.2f}.")
+    fecha_pago = fecha_hora_actual()
+    usuario = st.session_state.get("usuario", "Sistema")
+    for pago in pagos_detalle:
+        ejecutar_query(
+            "INSERT OR IGNORE INTO pagos_caja (origen, referencia_id, cliente, metodo_pago, monto, fecha, usuario, estado_caja, id_cierre, observacion) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (origen, referencia_id, cliente, pago["metodo_pago"], normalizar_monto(pago["monto"]), fecha_pago, usuario, estado_caja, id_cierre, observacion),
+            commit=True
+        )
+
+def prorratear_pagos_detalle(pagos_detalle, total_parcial, total_general):
+    total_parcial = normalizar_monto(total_parcial)
+    total_general = normalizar_monto(total_general)
+    if not pagos_detalle or total_parcial <= 0 or total_general <= 0:
+        return None
+    pagos = []
+    acumulado = 0
+    for idx, pago in enumerate(pagos_detalle):
+        if idx == len(pagos_detalle) - 1:
+            monto = normalizar_monto(total_parcial - acumulado)
+        else:
+            monto = normalizar_monto(total_parcial * normalizar_monto(pago.get("monto", 0)) / total_general)
+            acumulado = normalizar_monto(acumulado + monto)
+        if monto > 0:
+            pagos.append({"metodo_pago": pago.get("metodo_pago", "Efectivo"), "monto": monto})
+    return pagos
+
+def render_editor_pago_mixto(key_prefix, total_pago):
+    total_pago = normalizar_monto(total_pago)
+    key_pagos = f"{key_prefix}_pagos_mixtos"
+    if key_pagos not in st.session_state:
+        st.session_state[key_pagos] = [{"metodo_pago": METODOS_PAGO_BASE[0], "monto": total_pago}]
+    if total_pago > 0 and len(st.session_state[key_pagos]) == 1 and normalizar_monto(st.session_state[key_pagos][0].get("monto")) == 0:
+        st.session_state[key_pagos][0]["monto"] = total_pago
+
+    st.markdown("##### Pago mixto")
+    st.caption(f"Total a pagar: S/. {total_pago:.2f}")
+    pagos_actuales = st.data_editor(
+        pd.DataFrame(st.session_state[key_pagos]),
+        use_container_width=True,
+        hide_index=True,
+        num_rows="dynamic",
+        column_config={
+            "metodo_pago": st.column_config.SelectboxColumn("Método", options=METODOS_PAGO_BASE, required=True),
+            "monto": st.column_config.NumberColumn("Monto", min_value=0.0, step=1.0, format="S/. %.2f"),
+        },
+        key=f"{key_prefix}_editor_pago_mixto"
+    )
+    st.session_state[key_pagos] = pagos_actuales.to_dict("records")
+    pagos_limpios, _ = obtener_detalle_pago(key_prefix, total_pago, "Pago Mixto")
+    valido, total_asignado, pendiente = validar_pagos_mixtos(total_pago, pagos_limpios)
+    col_pm1, col_pm2 = st.columns(2)
+    with col_pm1:
+        st.metric("Total asignado", f"S/. {total_asignado:.2f}")
+    with col_pm2:
+        st.metric("Pendiente", f"S/. {pendiente:.2f}")
+    if total_pago <= 0:
+        st.info("Ingresa primero el monto a cobrar para configurar el pago mixto.")
+    elif total_asignado > total_pago:
+        st.error("El pago mixto supera el total a cobrar.")
+    elif not valido:
+        st.warning("Completa el monto exacto para poder confirmar el pago.")
+    return valido
+
+def seleccionar_pago_receptor(key_prefix, incluir_mesero=True, receptor_preseleccionado=None, total_pago=0.0):
     metodo_pago = st.selectbox("Método de Pago", METODOS_PAGO, key=f"{key_prefix}_metodo_pago")
-    responsable = metodo_pago if metodo_pago in METODOS_RECAUDADOR else "Caja Chica"
+    if metodo_pago == "Pago Mixto":
+        responsable = "Pago Mixto"
+        render_editor_pago_mixto(key_prefix, total_pago)
+    else:
+        responsable = metodo_pago if metodo_pago in METODOS_RECAUDADOR else "Caja Chica"
     return metodo_pago, "Metodo de pago", responsable
 
 def nombre_responsable_pago(metodo_pago, receptor_tipo="", receptor_nombre=""):
+    if metodo_pago == "Pago Mixto":
+        return "Pago Mixto"
     if metodo_pago in METODOS_RECAUDADOR:
         return metodo_pago
     return receptor_nombre or receptor_tipo or metodo_pago or "Caja Chica"
@@ -637,7 +816,7 @@ def recalcular_credito_cliente(cliente):
         )
     return total
 
-def liquidar_creditos_cliente(cliente, metodo_pago, receptor_tipo, receptor_nombre, atendido_nombre="", detalle_ids=None):
+def liquidar_creditos_cliente(cliente, metodo_pago, receptor_tipo, receptor_nombre, atendido_nombre="", detalle_ids=None, pagos_detalle=None):
     cliente_normalizado = cliente.strip().upper() if cliente and cliente.strip() else "GENERAL"
     params_detalles = [cliente_normalizado]
     filtro_ids = ""
@@ -677,6 +856,8 @@ def liquidar_creditos_cliente(cliente, metodo_pago, receptor_tipo, receptor_nomb
                 (venta_pago_id, producto, cantidad, precio_unitario, subtotal),
                 commit=True
             )
+        pagos_ventas = pagos_detalle if total_ventas == total_general else prorratear_pagos_detalle(pagos_detalle, total_ventas, total_general)
+        registrar_pagos_caja("Ventas", venta_pago_id, cliente_normalizado, total_ventas, metodo_pago, pagos_ventas, observacion="Liquidación de crédito de ventas")
 
     ids_pagados = [d[0] for d in detalles]
     ejecutar_query(
@@ -697,6 +878,8 @@ def liquidar_creditos_cliente(cliente, metodo_pago, receptor_tipo, receptor_nomb
                 (metodo_pago, receptor_tipo, receptor_nombre, piscina_id),
                 commit=True
             )
+            monto_piscina_ref = sum(float(d[4] or 0) for d in detalles if d[5] == "Piscina" and d[6] == piscina_id)
+            registrar_pagos_caja("Piscina", piscina_id, cliente_normalizado, monto_piscina_ref, metodo_pago, prorratear_pagos_detalle(pagos_detalle, monto_piscina_ref, total_general), observacion="Liquidación de crédito de piscina")
     if tiene_piscina_sin_ref:
         pendiente_piscina = ejecutar_query(
             "SELECT COUNT(*) FROM detalle_creditos WHERE cliente=? AND origen='Piscina'",
@@ -722,6 +905,8 @@ def liquidar_creditos_cliente(cliente, metodo_pago, receptor_tipo, receptor_nomb
                 (metodo_pago, receptor_tipo, receptor_nombre, cancha_id),
                 commit=True
             )
+            monto_cancha_ref = sum(float(d[4] or 0) for d in detalles if d[5] == "Cancha" and d[6] == cancha_id)
+            registrar_pagos_caja("Cancha - Saldo", cancha_id, cliente_normalizado, monto_cancha_ref, metodo_pago, prorratear_pagos_detalle(pagos_detalle, monto_cancha_ref, total_general), observacion="Liquidación de crédito de cancha")
     if tiene_cancha_sin_ref:
         pendiente_cancha = ejecutar_query(
             "SELECT COUNT(*) FROM detalle_creditos WHERE cliente=? AND origen='Cancha'",
@@ -2599,11 +2784,13 @@ else:
 
                 st.markdown("### Atendido por")
                 venta_form_nonce = st.session_state["venta_form_nonce"]
+                total_carrito_preview = sum(float(item.get("subtotal", 0) or 0) for item in st.session_state.get("carrito", []))
                 atendido_tipo, atendido_nombre = seleccionar_trabajador("Mesero o Trabajador", ("Mesero", "Trabajador"), f"venta_atendido_{venta_form_nonce}")
                 metodo_pago_venta, receptor_tipo_venta, receptor_nombre_venta = seleccionar_pago_receptor(
                     f"venta_{venta_form_nonce}",
                     incluir_mesero=True,
-                    receptor_preseleccionado={"tipo": atendido_tipo, "nombre": atendido_nombre}
+                    receptor_preseleccionado={"tipo": atendido_tipo, "nombre": atendido_nombre},
+                    total_pago=total_carrito_preview
                 )
                 
                 # Renderizar la tabla del carrito si tiene elementos
@@ -2630,6 +2817,8 @@ else:
                         if st.button("PROCESAR Y COBRAR TODO", type="primary", use_container_width=True, key="btn_procesar_pago_final"):
                             if not cliente_final or cliente_final == "➕ AGREGAR NUEVO CLIENTE":
                                 st.error("Por favor, ingrese o seleccione un nombre de cliente válido.")
+                            elif tipo_pago != "LLEVAR A CUENTA CRÉDITO (Anotar en lista histórica)" and not obtener_detalle_pago(f"venta_{venta_form_nonce}", total_carrito, metodo_pago_venta)[1]:
+                                st.error("El pago mixto debe sumar exactamente el total de la venta.")
                             else:
                                 fecha_actual = fecha_hora_actual()
                                 
@@ -2682,10 +2871,12 @@ else:
                                     
                                     ultimo_id_req = ejecutar_query("SELECT max(id) FROM ventas", fetch=True)
                                     venta_id = ultimo_id_req[0][0] if ultimo_id_req else 1
+                                    pagos_detalle_venta, _ = obtener_detalle_pago(f"venta_{venta_form_nonce}", total_carrito, metodo_pago_venta)
                                     
                                     for item in st.session_state['carrito']:
                                         ejecutar_query("INSERT INTO detalle_ventas (venta_id, producto, cantidad, precio_unitario, subtotal) VALUES (?,?,?,?,?)",
                                                        (venta_id, item['producto'], item['cantidad'], item['precio_unitario'], item['subtotal']), commit=True)
+                                    registrar_pagos_caja("Ventas", venta_id, cliente_final, total_carrito, metodo_pago_venta, pagos_detalle_venta, observacion="Venta en mostrador")
                                     
                                     encolar_impresion_nota(cliente_final, list(st.session_state['carrito']), total_carrito, "VENTA EN MOSTRADOR", atendido_nombre)
                                     
@@ -2749,14 +2940,18 @@ else:
                                 
                                 if not ids_seleccionados_pago:
                                     st.warning("Selecciona al menos un consumo para poder cobrar.")
+                                elif metodo_pago_venta == "Pago Mixto" and not obtener_detalle_pago(f"venta_{venta_form_nonce}", total_deuda, metodo_pago_venta)[1]:
+                                    st.error("El pago mixto debe sumar exactamente el total seleccionado para cobrar.")
                                 elif st.button(f"💵 Cerrar Cuenta y Cobrar S/. {total_deuda:.2f}", type="primary", use_container_width=True, key="btn_liquidar_final"):
+                                    pagos_detalle_credito, _ = obtener_detalle_pago(f"venta_{venta_form_nonce}", total_deuda, metodo_pago_venta)
                                     items_boleta, total_deuda = liquidar_creditos_cliente(
                                         cliente_a_cobrar,
                                         metodo_pago_venta,
                                         receptor_tipo_venta,
                                         receptor_nombre_venta,
                                         atendido_nombre,
-                                        ids_seleccionados_pago
+                                        ids_seleccionados_pago,
+                                        pagos_detalle_credito
                                     )
                                     encolar_impresion_nota(cliente_a_cobrar, items_boleta, total_deuda, "LIQUIDACION DE CREDITO", atendido_nombre)
                                     st.rerun()
@@ -3058,11 +3253,6 @@ else:
                 else:
                     cliente_piscina = st.text_input("Cliente", value="CLIENTE PISCINA", key=f"cliente_piscina_{piscina_nonce}").strip().upper() or "CLIENTE PISCINA"
                 _, trabajador_piscina = seleccionar_trabajador("Trabajador que atendió", ("Trabajador",), f"piscina_trabajador_{piscina_nonce}")
-                metodo_piscina, receptor_piscina, receptor_nombre_piscina = seleccionar_pago_receptor(
-                    f"piscina_{piscina_nonce}",
-                    incluir_mesero=False,
-                    receptor_preseleccionado={"tipo": "Trabajador", "nombre": trabajador_piscina}
-                )
                 
                 # Cálculo automático en tiempo real basado en la selección
                 calculo_sugerido = (ninos * p_nino) + (adultos * p_adulto) + (mayores * p_mayor)
@@ -3078,6 +3268,12 @@ else:
                 monto_mayor_al_sugerido = monto_final > calculo_sugerido
                 if monto_mayor_al_sugerido:
                     st.warning("El monto final no puede ser mayor al pago sugerido. Ajusta el importe para continuar.")
+                metodo_piscina, receptor_piscina, receptor_nombre_piscina = seleccionar_pago_receptor(
+                    f"piscina_{piscina_nonce}",
+                    incluir_mesero=False,
+                    receptor_preseleccionado={"tipo": "Trabajador", "nombre": trabajador_piscina},
+                    total_pago=monto_final
+                )
                 
                 if st.button("Registrar Ingreso Piscina", use_container_width=True, type="primary"):
                     if ninos == 0 and adultos == 0 and mayores == 0:
@@ -3086,6 +3282,8 @@ else:
                         st.error("Selecciona o ingresa el cliente de la cuenta crédito.")
                     elif monto_mayor_al_sugerido:
                         st.error("No se guardó el ingreso porque el monto final supera el pago sugerido.")
+                    elif destino_piscina != "Llevar a Cuenta Crédito" and not obtener_detalle_pago(f"piscina_{piscina_nonce}", monto_final, metodo_piscina)[1]:
+                        st.error("El pago mixto debe sumar exactamente el monto final de piscina.")
                     else:
                         # Registro en base de datos manteniendo el control de caja abierto para los turnos
                         fecha_registro = fecha_hora_actual()
@@ -3111,6 +3309,9 @@ else:
                                 piscina_id,
                                 trabajador_nombre=trabajador_piscina
                             )
+                        else:
+                            pagos_detalle_piscina, _ = obtener_detalle_pago(f"piscina_{piscina_nonce}", monto_final, metodo_piscina)
+                            registrar_pagos_caja("Piscina", piscina_id, cliente_piscina_guardar, monto_final, metodo_piscina, pagos_detalle_piscina, observacion="Ingreso de piscina")
                         st.success("¡Ingreso de piscina guardado exitosamente!")
                         
                         # Estructuración detallada para el ticket térmico
@@ -3243,7 +3444,8 @@ else:
                 metodo_cancha, receptor_cancha, receptor_nombre_cancha = seleccionar_pago_receptor(
                     f"cancha_{cancha_nonce}",
                     incluir_mesero=False,
-                    receptor_preseleccionado={"tipo": "Trabajador", "nombre": trabajador_cancha}
+                    receptor_preseleccionado={"tipo": "Trabajador", "nombre": trabajador_cancha},
+                    total_pago=c_adelanto
                 )
                 
                 if st.button("Guardar Reserva de Cancha", type="primary", use_container_width=True):
@@ -3272,6 +3474,8 @@ else:
                             st.error(f"Horario NO disponible. {tipo_existente} bloquea la reserva para el {fecha_str} a las {horario_final_str}. Cliente: {cliente_existente} (ID: {id_existente}).")
                         elif c_adelanto > c_total:
                             st.error("No se guardó la reserva porque el adelanto supera el monto total.")
+                        elif c_adelanto > 0 and not obtener_detalle_pago(f"cancha_{cancha_nonce}", c_adelanto, metodo_cancha)[1]:
+                            st.error("El pago mixto debe sumar exactamente el adelanto de cancha.")
                         else:
                             adelanto_guardar = c_adelanto
                             saldo_cancha = max(c_total - adelanto_guardar, 0)
@@ -3286,6 +3490,8 @@ else:
                                 registrar_credito_cliente(cliente_cancha_guardar, "Cancha", f"SALDO {tipo_cancha_sel}", 1, saldo_cancha, saldo_cancha, fecha_hora_actual(), cancha_id, trabajador_nombre=trabajador_cancha)
                             st.success("¡Reserva guardada correctamente!")
                             if adelanto_guardar > 0:
+                                pagos_detalle_cancha, _ = obtener_detalle_pago(f"cancha_{cancha_nonce}", adelanto_guardar, metodo_cancha)
+                                registrar_pagos_caja("Cancha - Adelanto", cancha_id, cliente_cancha_guardar, adelanto_guardar, metodo_cancha, pagos_detalle_cancha, observacion="Adelanto de cancha")
                                 it_cancha = [{"producto": f"Alquiler ({tipo_cancha_sel})", "cantidad": 1, "subtotal": adelanto_guardar}]
                                 encolar_impresion_nota(cliente_cancha_guardar, it_cancha, adelanto_guardar, "ALQUILER CANCHA", trabajador_cancha)
                                 reiniciar_formulario("cancha")
@@ -3328,20 +3534,36 @@ else:
                 
                 # Ejecución de la liquidación si se cuenta con un ID válido
                 if id_cancha_liquidar:
+                    reserva_liq_preview = ejecutar_query("SELECT cliente, monto_total, adelanto FROM cancha WHERE id=?", (id_cancha_liquidar,), fetch=True)
+                    restante_liq_preview = 0
+                    if reserva_liq_preview:
+                        restante_liq_preview = max(float(reserva_liq_preview[0][1] or 0) - float(reserva_liq_preview[0][2] or 0), 0)
+                        st.caption(f"Saldo a cobrar: S/. {restante_liq_preview:.2f}")
+                    metodo_cancha_liq, receptor_cancha_liq, receptor_nombre_cancha_liq = seleccionar_pago_receptor(
+                        f"cancha_liq_{id_cancha_liquidar}",
+                        incluir_mesero=False,
+                        receptor_preseleccionado={"tipo": "Trabajador", "nombre": trabajador_cancha},
+                        total_pago=restante_liq_preview
+                    )
                     if st.button("Marcar como Completado/Pagado", use_container_width=True, type="primary"):
                         check_reserva = ejecutar_query("SELECT cliente, monto_total, adelanto, estado_caja FROM cancha WHERE id=?", (id_cancha_liquidar,), fetch=True)
                         if check_reserva:
                             cliente_c, tot_c, ade_c, estado_caja_reserva = check_reserva[0]
                             restante = tot_c - ade_c
+                            if not obtener_detalle_pago(f"cancha_liq_{id_cancha_liquidar}", restante, metodo_cancha_liq)[1]:
+                                st.error("El pago mixto debe sumar exactamente el saldo de cancha.")
+                                st.stop()
+                            pagos_detalle_cancha_liq, _ = obtener_detalle_pago(f"cancha_liq_{id_cancha_liquidar}", restante, metodo_cancha_liq)
                             if estado_caja_reserva == "CERRADO":
-                                ejecutar_query("UPDATE cancha SET estado='PAGADO', metodo_pago=?, receptor_tipo=?, receptor_nombre=? WHERE id=?", (metodo_cancha, receptor_cancha, receptor_nombre_cancha, id_cancha_liquidar), commit=True)
+                                ejecutar_query("UPDATE cancha SET estado='PAGADO', metodo_pago=?, receptor_tipo=?, receptor_nombre=? WHERE id=?", (metodo_cancha_liq, receptor_cancha_liq, receptor_nombre_cancha_liq, id_cancha_liquidar), commit=True)
                                 ejecutar_query(
                                     "INSERT INTO ventas (cliente, total, estado, fecha, estado_caja, atendido_por_tipo, atendido_por_nombre, metodo_pago, receptor_tipo, receptor_nombre, origen) VALUES (?,?,?,?, 'ABIERTO', ?,?,?,?,?, 'Cancha')",
-                                    (cliente_c, restante, "PAGADO", fecha_hora_actual(), "Trabajador", trabajador_cancha, metodo_cancha, receptor_cancha, receptor_nombre_cancha),
+                                    (cliente_c, restante, "PAGADO", fecha_hora_actual(), "Trabajador", trabajador_cancha, metodo_cancha_liq, receptor_cancha_liq, receptor_nombre_cancha_liq),
                                     commit=True
                                 )
                             else:
-                                ejecutar_query("UPDATE cancha SET estado='PAGADO', estado_caja='ABIERTO', metodo_pago=?, receptor_tipo=?, receptor_nombre=? WHERE id=?", (metodo_cancha, receptor_cancha, receptor_nombre_cancha, id_cancha_liquidar), commit=True)
+                                ejecutar_query("UPDATE cancha SET estado='PAGADO', estado_caja='ABIERTO', metodo_pago=?, receptor_tipo=?, receptor_nombre=? WHERE id=?", (metodo_cancha_liq, receptor_cancha_liq, receptor_nombre_cancha_liq, id_cancha_liquidar), commit=True)
+                            registrar_pagos_caja("Cancha - Saldo", id_cancha_liquidar, cliente_c, restante, metodo_cancha_liq, pagos_detalle_cancha_liq, observacion="Saldo de cancha")
                             ejecutar_query("DELETE FROM detalle_creditos WHERE origen='Cancha' AND referencia_id=?", (id_cancha_liquidar,), commit=True)
                             deuda_restante_cliente = ejecutar_query("SELECT SUM(subtotal) FROM detalle_creditos WHERE cliente=?", (cliente_c,), fetch=True)[0][0] or 0
                             if deuda_restante_cliente > 0:
@@ -3424,16 +3646,19 @@ else:
                 st.session_state["mostrar_ticket"] = False
             
             # --- CONSULTA DE LA CAJA ACTIVA (TURNO ACTUAL) ---
-            ventas_hoy = ejecutar_query("SELECT total FROM ventas WHERE estado='PAGADO' AND estado_caja='ABIERTO' AND COALESCE(estado_boleta,'ACTIVA')!='LIBERADA'", fetch=True)
-            piscina_hoy = ejecutar_query("SELECT monto_pagado FROM piscina WHERE estado='PAGADO' AND estado_caja='ABIERTO'", fetch=True)
-            canchas_hoy = ejecutar_query("SELECT adelanto FROM cancha WHERE estado_caja='ABIERTO' AND estado!='ELIMINADA' AND COALESCE(adelanto,0)>0", fetch=True)
-            canchas_saldos_hoy = ejecutar_query("SELECT (monto_total - adelanto) FROM cancha WHERE estado='PAGADO' AND estado_caja='ABIERTO'", fetch=True)
-            local_hoy = ejecutar_query("SELECT monto_total FROM reservas_local WHERE estado='PAGADO' AND estado_caja='ABIERTO'", fetch=True)
-            
-            total_v = sum([v[0] for v in ventas_hoy])
-            total_p = sum([p[0] for p in piscina_hoy])
-            total_c = sum([c[0] for c in canchas_hoy]) + sum([cs[0] for cs in canchas_saldos_hoy])
-            total_l = sum([l[0] for l in local_hoy])
+            resumen_caja_origen = dict(ejecutar_query(
+                """
+                SELECT origen, SUM(monto)
+                FROM pagos_caja
+                WHERE estado_caja='ABIERTO'
+                GROUP BY origen
+                """,
+                fetch=True
+            ) or [])
+            total_v = float(resumen_caja_origen.get("Ventas", 0) or 0)
+            total_p = float(resumen_caja_origen.get("Piscina", 0) or 0)
+            total_c = float(resumen_caja_origen.get("Cancha - Adelanto", 0) or 0) + float(resumen_caja_origen.get("Cancha - Saldo", 0) or 0)
+            total_l = float(resumen_caja_origen.get("Reserva de Local", 0) or 0)
             
             gran_total_caja = total_v + total_p + total_c + total_l
             
@@ -3448,26 +3673,17 @@ else:
             with st.expander("Detalle de ingresos"):
                 detalle_ingresos = ejecutar_query(
                     """
-                    SELECT 'Ventas' AS origen, id, cliente, fecha, total, metodo_pago
-                    FROM ventas
-                    WHERE estado='PAGADO' AND estado_caja='ABIERTO' AND COALESCE(estado_boleta,'ACTIVA')!='LIBERADA'
-                    UNION ALL
-                    SELECT 'Piscina', id, cliente, fecha, monto_pagado, metodo_pago
-                    FROM piscina
-                    WHERE estado='PAGADO' AND estado_caja='ABIERTO'
-                    UNION ALL
-                    SELECT 'Cancha - Adelanto', id, cliente, fecha_reserva || ' ' || horario, adelanto, metodo_pago
-                    FROM cancha
-                    WHERE estado_caja='ABIERTO' AND estado!='ELIMINADA' AND COALESCE(adelanto,0)>0
-                    UNION ALL
-                    SELECT 'Cancha - Saldo', id, cliente, fecha_reserva || ' ' || horario, (monto_total - adelanto), metodo_pago
-                    FROM cancha
-                    WHERE estado='PAGADO' AND estado_caja='ABIERTO' AND (monto_total - adelanto)>0
-                    UNION ALL
-                    SELECT 'Reserva de Local', id, cliente, fecha_reserva || ' ' || horario, monto_total, metodo_pago
-                    FROM reservas_local
-                    WHERE estado='PAGADO' AND estado_caja='ABIERTO'
-                    ORDER BY fecha DESC
+                    SELECT
+                        origen,
+                        referencia_id,
+                        cliente,
+                        MAX(fecha) AS fecha,
+                        SUM(monto) AS total,
+                        GROUP_CONCAT(metodo_pago || ' S/. ' || printf('%.2f', monto), ' | ') AS metodo_pago
+                    FROM pagos_caja
+                    WHERE estado_caja='ABIERTO'
+                    GROUP BY origen, referencia_id, cliente
+                    ORDER BY MAX(fecha) DESC
                     """,
                     fetch=True
                 )
@@ -3612,37 +3828,10 @@ else:
                     st.info("No hay ingresos registrados en la caja abierta.")
             recaudacion_trab = ejecutar_query(
                 """
-                SELECT receptor, SUM(monto)
-                FROM (
-                    SELECT COALESCE(NULLIF(TRIM(metodo_pago),''),'Efectivo') receptor, total monto
-                    FROM ventas
-                    WHERE estado='PAGADO'
-                      AND estado_caja='ABIERTO'
-                      AND COALESCE(estado_boleta,'ACTIVA')!='LIBERADA'
-                    UNION ALL
-                    SELECT COALESCE(NULLIF(TRIM(metodo_pago),''),'Efectivo'), monto_pagado
-                    FROM piscina
-                    WHERE estado='PAGADO'
-                      AND estado_caja='ABIERTO'
-                    UNION ALL
-                    SELECT COALESCE(NULLIF(TRIM(metodo_pago),''),'Efectivo'), adelanto
-                    FROM cancha
-                    WHERE estado_caja='ABIERTO'
-                      AND estado!='ELIMINADA'
-                      AND COALESCE(adelanto,0)>0
-                    UNION ALL
-                    SELECT COALESCE(NULLIF(TRIM(metodo_pago),''),'Efectivo'), (monto_total - adelanto)
-                    FROM cancha
-                    WHERE estado='PAGADO'
-                      AND estado_caja='ABIERTO'
-                      AND (monto_total - adelanto)>0
-                    UNION ALL
-                    SELECT COALESCE(NULLIF(TRIM(metodo_pago),''),'Efectivo'), monto_total
-                    FROM reservas_local
-                    WHERE estado='PAGADO'
-                      AND estado_caja='ABIERTO'
-                )
-                GROUP BY receptor
+                SELECT COALESCE(NULLIF(TRIM(metodo_pago),''),'Efectivo') receptor, SUM(monto)
+                FROM pagos_caja
+                WHERE estado_caja='ABIERTO'
+                GROUP BY COALESCE(NULLIF(TRIM(metodo_pago),''),'Efectivo')
                 ORDER BY receptor
                 """,
                 fetch=True
@@ -3693,11 +3882,13 @@ else:
                             ejecutar_query(f"UPDATE cancha SET estado_caja='CERRADO', id_cierre={id_cierre_actual} WHERE estado_caja='ABIERTO'", commit=True)
                             ejecutar_query(f"UPDATE piscina SET estado_caja='CERRADO', id_cierre={id_cierre_actual} WHERE estado_caja='ABIERTO' AND estado='PAGADO'", commit=True)
                             ejecutar_query(f"UPDATE reservas_local SET estado_caja='CERRADO', id_cierre={id_cierre_actual} WHERE estado_caja='ABIERTO' AND estado='PAGADO'", commit=True)
+                            ejecutar_query(f"UPDATE pagos_caja SET estado_caja='CERRADO', id_cierre={id_cierre_actual} WHERE estado_caja='ABIERTO'", commit=True)
                         else:
                             ejecutar_query("UPDATE ventas SET estado_caja='CERRADO' WHERE estado_caja='ABIERTO' AND estado='PAGADO'", commit=True)
                             ejecutar_query("UPDATE cancha SET estado_caja='CERRADO' WHERE estado_caja='ABIERTO'", commit=True)
                             ejecutar_query("UPDATE piscina SET estado_caja='CERRADO' WHERE estado_caja='ABIERTO' AND estado='PAGADO'", commit=True)
                             ejecutar_query("UPDATE reservas_local SET estado_caja='CERRADO' WHERE estado_caja='ABIERTO' AND estado='PAGADO'", commit=True)
+                            ejecutar_query("UPDATE pagos_caja SET estado_caja='CERRADO' WHERE estado_caja='ABIERTO'", commit=True)
 
                         st.success("Caja cerrada correctamente. El sistema se ha reiniciado para el siguiente turno.")
                         st.rerun()
@@ -3878,11 +4069,14 @@ else:
                 metodo_local, receptor_local, receptor_nombre_local = seleccionar_pago_receptor(
                     f"local_{local_nonce}",
                     incluir_mesero=False,
-                    receptor_preseleccionado={"tipo": "Trabajador", "nombre": trabajador_local}
+                    receptor_preseleccionado={"tipo": "Trabajador", "nombre": trabajador_local},
+                    total_pago=monto_local
                 )
                 if st.button("Guardar reserva de local", type="primary", use_container_width=True):
                     if not cliente_local:
                         st.error("Ingrese el cliente.")
+                    elif not obtener_detalle_pago(f"local_{local_nonce}", monto_local, metodo_local)[1]:
+                        st.error("El pago mixto debe sumar exactamente el monto de la reserva.")
                     else:
                         fecha_str = fecha_local.strftime("%Y-%m-%d")
                         cruce_local = ejecutar_query(
@@ -3898,6 +4092,9 @@ else:
                                 (cliente_local, area_local, fecha_str, horario_local, monto_local, "PAGADO", metodo_local, receptor_local, receptor_nombre_local, trabajador_local),
                                 commit=True
                             )
+                            reserva_local_id = ejecutar_query("SELECT max(id) FROM reservas_local", fetch=True)[0][0]
+                            pagos_detalle_local, _ = obtener_detalle_pago(f"local_{local_nonce}", monto_local, metodo_local)
+                            registrar_pagos_caja("Reserva de Local", reserva_local_id, cliente_local, monto_local, metodo_local, pagos_detalle_local, observacion=f"Reserva local - {area_local}")
                             encolar_impresion_nota(cliente_local, [{"producto": f"RESERVA LOCAL - {area_local}", "cantidad": 1, "subtotal": monto_local}], monto_local, "RESERVA DE LOCAL", trabajador_local)
                             reiniciar_formulario("local")
                             st.rerun()
