@@ -101,24 +101,15 @@ def parsear_fecha_hora_local(valor):
     fecha = datetime.strptime(str(valor), "%Y-%m-%d %H:%M")
     return fecha.replace(tzinfo=ZONA_HORARIA_SISTEMA)
 
-@st.cache_resource(show_spinner=False)
-def obtener_pool_postgres(database_url):
-    if psycopg2_pool is None:
-        raise RuntimeError("Falta instalar psycopg2-binary para usar PostgreSQL en Streamlit Cloud.")
-    return psycopg2_pool.SimpleConnectionPool(1, 8, database_url, connect_timeout=12)
-
 def conectar_db():
     if DB_BACKEND == "postgres":
         if psycopg2 is None:
             raise RuntimeError("Falta instalar psycopg2-binary para usar PostgreSQL en Streamlit Cloud.")
-        return obtener_pool_postgres(DATABASE_URL).getconn()
+        return psycopg2.connect(DATABASE_URL, connect_timeout=12)
     return sqlite3.connect(DB_NAME)
 
 def liberar_db(conn):
-    if DB_BACKEND == "postgres":
-        obtener_pool_postgres(DATABASE_URL).putconn(conn)
-    else:
-        conn.close()
+    conn.close()
 
 def ejecutar_sql_directo(cursor, query, params=()):
     if DB_BACKEND == "postgres":
@@ -171,7 +162,7 @@ def asegurar_estructura_db_postgres():
     conn = conectar_db()
     cursor = conn.cursor()
     cursor.execute("CREATE SCHEMA IF NOT EXISTS public")
-    cursor.execute("SET search_path TO public")
+    cursor.execute("SET search_path TO public, pg_catalog")
     tablas_sql = [
         """CREATE TABLE IF NOT EXISTS usuarios (id SERIAL PRIMARY KEY, username TEXT UNIQUE, password TEXT, rol TEXT, login_token TEXT)""",
         """CREATE TABLE IF NOT EXISTS inventario (id SERIAL PRIMARY KEY, nombre TEXT UNIQUE, proveedor TEXT, fecha_ingreso TEXT, costo REAL, precio REAL, stock INTEGER)""",
@@ -561,7 +552,7 @@ def preparar_query_runtime(query, params=()):
                     query_pg = f"INSERT INTO {tabla} ({cols}) VALUES ({marcas}) ON CONFLICT ({', '.join(conflicto)}) DO UPDATE SET {updates}"
                 else:
                     query_pg = f"INSERT INTO {tabla} ({cols}) VALUES ({marcas}) ON CONFLICT ({', '.join(conflicto)}) DO NOTHING"
-                return query_pg, params
+                return calificar_tablas_postgres(query_pg), params
     return adaptar_sql_postgres(query), params
 
 def ejecutar_query(query, params=(), fetch=False, commit=False):
@@ -569,8 +560,10 @@ def ejecutar_query(query, params=(), fetch=False, commit=False):
     try:
         cursor = conn.cursor()
         if DB_BACKEND == "postgres":
-            cursor.execute("SET search_path TO public")
+            cursor.execute("SET search_path TO public, pg_catalog")
         query_preparada, params_preparados = preparar_query_runtime(query, params)
+        if DB_BACKEND == "postgres":
+            query_preparada = calificar_tablas_postgres(query_preparada)
         cursor.execute(query_preparada, params_preparados)
         res = None
         if fetch:
