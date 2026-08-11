@@ -35,6 +35,26 @@ METODOS_RECAUDADOR = {"Yape José Luis", "Yape Sofia", "PLIN"}
 ZONA_HORARIA_SISTEMA = ZoneInfo("America/Lima")
 COCINA_VERDE_SEGUNDOS = 20 * 60
 COCINA_ALERTA_SEGUNDOS = 30 * 60
+TABLAS_POSTGRES_PUBLIC = (
+    "usuarios",
+    "inventario",
+    "detalle_creditos",
+    "cocina",
+    "tarifas",
+    "tarifas_cancha",
+    "configuracion",
+    "trabajadores",
+    "tarifas_local",
+    "reservas_local",
+    "boletas_liberadas",
+    "stock_movimientos",
+    "piscina",
+    "ventas",
+    "detalle_ventas",
+    "historial_cajas",
+    "cancha",
+    "pagos_caja",
+)
 
 def obtener_database_url():
     try:
@@ -85,7 +105,7 @@ def parsear_fecha_hora_local(valor):
 def obtener_pool_postgres(database_url):
     if psycopg2_pool is None:
         raise RuntimeError("Falta instalar psycopg2-binary para usar PostgreSQL en Streamlit Cloud.")
-    return psycopg2_pool.SimpleConnectionPool(1, 8, database_url, connect_timeout=12)
+    return psycopg2_pool.SimpleConnectionPool(1, 8, database_url, connect_timeout=12, options="-c search_path=public")
 
 def conectar_db():
     if DB_BACKEND == "postgres":
@@ -106,6 +126,24 @@ def ejecutar_sql_directo(cursor, query, params=()):
     else:
         cursor.execute(query, params)
 
+def calificar_tablas_postgres(query):
+    q = query
+    for tabla in sorted(TABLAS_POSTGRES_PUBLIC, key=len, reverse=True):
+        tabla_esc = re.escape(tabla)
+        q = re.sub(
+            rf"\b(FROM|JOIN|INTO|UPDATE|ON)\s+(?!public\.)(?P<tabla>{tabla_esc})\b",
+            rf"\1 public.\g<tabla>",
+            q,
+            flags=re.IGNORECASE
+        )
+        q = re.sub(
+            rf"\b(TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?)(?!public\.)(?P<tabla>{tabla_esc})\b",
+            rf"\1public.\g<tabla>",
+            q,
+            flags=re.IGNORECASE
+        )
+    return q
+
 def adaptar_sql_postgres(query):
     q = query
     q = q.replace("?", "%s")
@@ -115,17 +153,18 @@ def adaptar_sql_postgres(query):
         original_upper = query.upper()
         if "INSERT OR IGNORE" in original_upper:
             q = q.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
-    return q
+    return calificar_tablas_postgres(q)
 
 def ejecutar_upsert_postgres(cursor, tabla, columnas, valores, conflicto):
+    tabla_pg = f"public.{tabla}" if "." not in tabla else tabla
     cols = ", ".join(columnas)
     marcas = ", ".join(["%s"] * len(columnas))
     updates = ", ".join([f"{col}=EXCLUDED.{col}" for col in columnas if col not in conflicto])
     conflict_cols = ", ".join(conflicto)
     if updates:
-        sql = f"INSERT INTO {tabla} ({cols}) VALUES ({marcas}) ON CONFLICT ({conflict_cols}) DO UPDATE SET {updates}"
+        sql = f"INSERT INTO {tabla_pg} ({cols}) VALUES ({marcas}) ON CONFLICT ({conflict_cols}) DO UPDATE SET {updates}"
     else:
-        sql = f"INSERT INTO {tabla} ({cols}) VALUES ({marcas}) ON CONFLICT ({conflict_cols}) DO NOTHING"
+        sql = f"INSERT INTO {tabla_pg} ({cols}) VALUES ({marcas}) ON CONFLICT ({conflict_cols}) DO NOTHING"
     cursor.execute(sql, valores)
 
 def asegurar_estructura_db_postgres():
@@ -155,7 +194,7 @@ def asegurar_estructura_db_postgres():
         """CREATE UNIQUE INDEX IF NOT EXISTS ux_pagos_caja_unicos ON pagos_caja (origen, referencia_id, metodo_pago, monto)"""
     ]
     for sql in tablas_sql:
-        cursor.execute(sql)
+        cursor.execute(calificar_tablas_postgres(sql))
 
     ejecutar_upsert_postgres(cursor, "usuarios", ["username", "password", "rol"], ("administrador", "admin123", "Administrador"), ["username"])
     ejecutar_upsert_postgres(cursor, "usuarios", ["username", "password", "rol"], ("cocinero", "cocina123", "Cocinero"), ["username"])
