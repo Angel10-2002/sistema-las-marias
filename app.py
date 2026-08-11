@@ -64,7 +64,12 @@ def parsear_fecha_hora_local(valor):
 def obtener_pool_postgres(database_url):
     if psycopg2_pool is None:
         raise RuntimeError("Falta instalar psycopg2-binary para usar PostgreSQL en Streamlit Cloud.")
-    return psycopg2_pool.SimpleConnectionPool(1, 8, database_url)
+    return psycopg2_pool.SimpleConnectionPool(
+        1,
+        8,
+        database_url,
+        options="-c search_path=public"
+    )
 
 def conectar_db():
     if DB_BACKEND == "postgres":
@@ -110,6 +115,8 @@ def ejecutar_upsert_postgres(cursor, tabla, columnas, valores, conflicto):
 def asegurar_estructura_db_postgres():
     conn = conectar_db()
     cursor = conn.cursor()
+    cursor.execute("CREATE SCHEMA IF NOT EXISTS public")
+    cursor.execute("SET search_path TO public")
     tablas_sql = [
         """CREATE TABLE IF NOT EXISTS usuarios (id SERIAL PRIMARY KEY, username TEXT UNIQUE, password TEXT, rol TEXT, login_token TEXT)""",
         """CREATE TABLE IF NOT EXISTS inventario (id SERIAL PRIMARY KEY, nombre TEXT UNIQUE, proveedor TEXT, fecha_ingreso TEXT, costo REAL, precio REAL, stock INTEGER)""",
@@ -506,6 +513,8 @@ def ejecutar_query(query, params=(), fetch=False, commit=False):
     conn = conectar_db()
     try:
         cursor = conn.cursor()
+        if DB_BACKEND == "postgres":
+            cursor.execute("SET search_path TO public")
         query_preparada, params_preparados = preparar_query_runtime(query, params)
         cursor.execute(query_preparada, params_preparados)
         res = None
@@ -515,8 +524,7 @@ def ejecutar_query(query, params=(), fetch=False, commit=False):
             conn.commit()
         return res
     except Exception:
-        if commit:
-            conn.rollback()
+        conn.rollback()
         raise
     finally:
         liberar_db(conn)
@@ -653,25 +661,33 @@ def prorratear_pagos_detalle(pagos_detalle, total_parcial, total_general):
 def render_editor_pago_mixto(key_prefix, total_pago):
     total_pago = normalizar_monto(total_pago)
     key_pagos = f"{key_prefix}_pagos_mixtos"
-    if key_pagos not in st.session_state:
+    if key_pagos not in st.session_state or not isinstance(st.session_state.get(key_pagos), list):
         st.session_state[key_pagos] = [{"metodo_pago": METODOS_PAGO_BASE[0], "monto": total_pago}]
-    if total_pago > 0 and len(st.session_state[key_pagos]) == 1 and normalizar_monto(st.session_state[key_pagos][0].get("monto")) == 0:
-        st.session_state[key_pagos][0]["monto"] = total_pago
+
+    valores_actuales = {metodo: 0.0 for metodo in METODOS_PAGO_BASE}
+    for pago in st.session_state.get(key_pagos, []):
+        metodo = pago.get("metodo_pago")
+        if metodo in valores_actuales:
+            valores_actuales[metodo] = normalizar_monto(valores_actuales[metodo] + normalizar_monto(pago.get("monto", 0)))
+    if total_pago > 0 and sum(valores_actuales.values()) == 0:
+        valores_actuales[METODOS_PAGO_BASE[0]] = total_pago
 
     st.markdown("##### Pago mixto")
     st.caption(f"Total a pagar: S/. {total_pago:.2f}")
-    pagos_actuales = st.data_editor(
-        pd.DataFrame(st.session_state[key_pagos]),
-        use_container_width=True,
-        hide_index=True,
-        num_rows="dynamic",
-        column_config={
-            "metodo_pago": st.column_config.SelectboxColumn("Método", options=METODOS_PAGO_BASE, required=True),
-            "monto": st.column_config.NumberColumn("Monto", min_value=0.0, step=1.0, format="S/. %.2f"),
-        },
-        key=f"{key_prefix}_editor_pago_mixto"
-    )
-    st.session_state[key_pagos] = pagos_actuales.to_dict("records")
+    cols_pago = st.columns(2)
+    nuevos_pagos = []
+    for idx, metodo in enumerate(METODOS_PAGO_BASE):
+        with cols_pago[idx % 2]:
+            monto_metodo = st.number_input(
+                metodo,
+                min_value=0.0,
+                value=float(valores_actuales.get(metodo, 0.0)),
+                step=1.0,
+                key=f"{key_prefix}_monto_mixto_{metodo}"
+            )
+        if monto_metodo > 0:
+            nuevos_pagos.append({"metodo_pago": metodo, "monto": normalizar_monto(monto_metodo)})
+    st.session_state[key_pagos] = nuevos_pagos
     pagos_limpios, _ = obtener_detalle_pago(key_prefix, total_pago, "Pago Mixto")
     valido, total_asignado, pendiente = validar_pagos_mixtos(total_pago, pagos_limpios)
     col_pm1, col_pm2 = st.columns(2)
