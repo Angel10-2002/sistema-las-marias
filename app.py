@@ -16,8 +16,10 @@ import streamlit.components.v1 as components
 
 try:
     import psycopg2
+    from psycopg2 import pool as psycopg2_pool
 except ImportError:
     psycopg2 = None
+    psycopg2_pool = None
 
 # Configuración de página
 st.set_page_config(page_title="Complejo Recreativo Las Marías", layout="wide", page_icon="🏊‍♂️", initial_sidebar_state="expanded")
@@ -58,12 +60,24 @@ def parsear_fecha_hora_local(valor):
     fecha = datetime.strptime(str(valor), "%Y-%m-%d %H:%M")
     return fecha.replace(tzinfo=ZONA_HORARIA_SISTEMA)
 
+@st.cache_resource(show_spinner=False)
+def obtener_pool_postgres(database_url):
+    if psycopg2_pool is None:
+        raise RuntimeError("Falta instalar psycopg2-binary para usar PostgreSQL en Streamlit Cloud.")
+    return psycopg2_pool.SimpleConnectionPool(1, 8, database_url)
+
 def conectar_db():
     if DB_BACKEND == "postgres":
         if psycopg2 is None:
             raise RuntimeError("Falta instalar psycopg2-binary para usar PostgreSQL en Streamlit Cloud.")
-        return psycopg2.connect(DATABASE_URL)
+        return obtener_pool_postgres(DATABASE_URL).getconn()
     return sqlite3.connect(DB_NAME)
+
+def liberar_db(conn):
+    if DB_BACKEND == "postgres":
+        obtener_pool_postgres(DATABASE_URL).putconn(conn)
+    else:
+        conn.close()
 
 def ejecutar_sql_directo(cursor, query, params=()):
     if DB_BACKEND == "postgres":
@@ -129,7 +143,7 @@ def asegurar_estructura_db_postgres():
     for area, precio in [("Comedor Principal", 0.0), ("Comedor Piscina", 0.0)]:
         ejecutar_upsert_postgres(cursor, "tarifas_local", ["area", "precio"], (area, precio), ["area"])
     conn.commit()
-    conn.close()
+    liberar_db(conn)
 
 # --- MIGRACIÓN AUTOMÁTICA E INICIALIZACIÓN DE LA BASE DE DATOS ---
 def asegurar_estructura_db():
@@ -453,7 +467,12 @@ def asegurar_estructura_db():
     conn.commit()
     conn.close()
 
-asegurar_estructura_db()
+@st.cache_resource(show_spinner=False)
+def inicializar_estructura_db_cache(backend, database_url, db_name):
+    asegurar_estructura_db()
+    return True
+
+inicializar_estructura_db_cache(DB_BACKEND, DATABASE_URL, DB_NAME)
 
 def preparar_query_runtime(query, params=()):
     if DB_BACKEND != "postgres":
@@ -485,16 +504,22 @@ def preparar_query_runtime(query, params=()):
 
 def ejecutar_query(query, params=(), fetch=False, commit=False):
     conn = conectar_db()
-    cursor = conn.cursor()
-    query_preparada, params_preparados = preparar_query_runtime(query, params)
-    cursor.execute(query_preparada, params_preparados)
-    res = None
-    if fetch:
-        res = cursor.fetchall()
-    if commit:
-        conn.commit()
-    conn.close()
-    return res
+    try:
+        cursor = conn.cursor()
+        query_preparada, params_preparados = preparar_query_runtime(query, params)
+        cursor.execute(query_preparada, params_preparados)
+        res = None
+        if fetch:
+            res = cursor.fetchall()
+        if commit:
+            conn.commit()
+        return res
+    except Exception:
+        if commit:
+            conn.rollback()
+        raise
+    finally:
+        liberar_db(conn)
 
 def registrar_movimiento_stock(inventario_id, producto, tipo, cantidad, stock_anterior, stock_nuevo, motivo=""):
     usuario = st.session_state.get("usuario", "Sistema")
