@@ -11,6 +11,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from zoneinfo import ZoneInfo
 import streamlit.components.v1 as components
 
@@ -37,9 +38,29 @@ COCINA_ALERTA_SEGUNDOS = 30 * 60
 
 def obtener_database_url():
     try:
-        return st.secrets.get("DATABASE_URL", "")
+        valor = st.secrets.get("DATABASE_URL", "")
     except Exception:
-        return os.environ.get("DATABASE_URL", "")
+        valor = os.environ.get("DATABASE_URL", "")
+    return normalizar_database_url(valor)
+
+def normalizar_database_url(valor):
+    url = str(valor or "").strip().strip('"').strip("'")
+    if not url:
+        return ""
+    if "=" in url and not url.startswith(("postgres://", "postgresql://")):
+        url = url.split("=", 1)[1].strip().strip('"').strip("'")
+    if "postgresql://" in url and not url.startswith("postgresql://"):
+        url = url[url.find("postgresql://"):]
+    if "postgres://" in url and not url.startswith("postgres://"):
+        url = url[url.find("postgres://"):]
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+    if url.startswith("postgresql://"):
+        partes = urlparse(url)
+        query = dict(parse_qsl(partes.query, keep_blank_values=True))
+        query.setdefault("sslmode", "require")
+        url = urlunparse(partes._replace(query=urlencode(query)))
+    return url
 
 DATABASE_URL = obtener_database_url()
 DB_BACKEND = "postgres" if DATABASE_URL else "sqlite"
@@ -64,12 +85,7 @@ def parsear_fecha_hora_local(valor):
 def obtener_pool_postgres(database_url):
     if psycopg2_pool is None:
         raise RuntimeError("Falta instalar psycopg2-binary para usar PostgreSQL en Streamlit Cloud.")
-    return psycopg2_pool.SimpleConnectionPool(
-        1,
-        8,
-        database_url,
-        options="-c search_path=public"
-    )
+    return psycopg2_pool.SimpleConnectionPool(1, 8, database_url, connect_timeout=12)
 
 def conectar_db():
     if DB_BACKEND == "postgres":
