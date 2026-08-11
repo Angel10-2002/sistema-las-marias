@@ -1,0 +1,5 @@
+complejo.db
+*.db
+__pycache__/
+*.log
+backups/
