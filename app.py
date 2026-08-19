@@ -91,6 +91,81 @@ def obtener_pool_postgres(database_url):
         return None
     return psycopg2_pool.SimpleConnectionPool(1, 8, database_url, connect_timeout=12)
 
+def escapar_identificador_postgres(nombre):
+    return '"' + str(nombre or "").replace('"', '""') + '"'
+
+@st.cache_resource(show_spinner=False)
+def obtener_esquema_postgres_cache(database_url):
+    if psycopg2 is None:
+        return "public"
+    conn = psycopg2.connect(database_url, connect_timeout=12)
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT table_schema
+            FROM information_schema.tables
+            WHERE table_name IN (
+                'usuarios',
+                'inventario',
+                'detalle_creditos',
+                'cocina',
+                'tarifas',
+                'tarifas_cancha',
+                'configuracion',
+                'trabajadores',
+                'tarifas_local',
+                'reservas_local',
+                'boletas_liberadas',
+                'stock_movimientos',
+                'piscina',
+                'ventas',
+                'detalle_ventas',
+                'historial_cajas',
+                'cancha',
+                'pagos_caja'
+            )
+              AND table_schema NOT IN ('pg_catalog', 'information_schema')
+            GROUP BY table_schema
+            ORDER BY COUNT(*) DESC, CASE WHEN table_schema='public' THEN 0 ELSE 1 END, table_schema
+            LIMIT 1
+            """
+        )
+        fila = cursor.fetchone()
+        if fila and fila[0]:
+            return fila[0]
+        cursor.execute("SELECT COALESCE(current_schema(), current_user)")
+        fila = cursor.fetchone()
+        esquema = fila[0] if fila and fila[0] else "public"
+        try:
+            cursor.execute(f"CREATE SCHEMA IF NOT EXISTS {escapar_identificador_postgres(esquema)}")
+            conn.commit()
+            return esquema
+        except Exception:
+            conn.rollback()
+            cursor.execute(
+                """
+                SELECT nspname
+                FROM pg_namespace
+                WHERE nspname NOT IN ('pg_catalog', 'information_schema')
+                  AND nspname NOT LIKE 'pg_toast%'
+                ORDER BY CASE WHEN nspname=current_user THEN 0 WHEN nspname='public' THEN 1 ELSE 2 END, nspname
+                LIMIT 1
+                """
+            )
+            fila = cursor.fetchone()
+            return fila[0] if fila and fila[0] else esquema
+    finally:
+        conn.close()
+
+def esquema_postgres():
+    if DB_BACKEND != "postgres":
+        return ""
+    return obtener_esquema_postgres_cache(DATABASE_URL)
+
+def tabla_postgres(tabla):
+    return f"{escapar_identificador_postgres(esquema_postgres())}.{tabla}"
+
 def ahora_windows():
     return datetime.now(ZONA_HORARIA_SISTEMA)
 
@@ -135,23 +210,24 @@ def ejecutar_sql_directo(cursor, query, params=()):
 
 def calificar_tablas_postgres(query):
     q = query
+    esquema = escapar_identificador_postgres(esquema_postgres())
     for tabla in sorted(TABLAS_POSTGRES_PUBLIC, key=len, reverse=True):
         tabla_esc = re.escape(tabla)
         q = re.sub(
-            rf"\b(FROM|JOIN|INTO|UPDATE)\s+(?!public\.)(?P<tabla>{tabla_esc})\b",
-            rf"\1 public.\g<tabla>",
+            rf"\b(FROM|JOIN|INTO|UPDATE)\s+(?!\"?[A-Za-z_][A-Za-z0-9_]*\"?\.)(?P<tabla>{tabla_esc})\b",
+            lambda m: f"{m.group(1)} {esquema}.{m.group('tabla')}",
             q,
             flags=re.IGNORECASE
         )
         q = re.sub(
-            rf"\b(TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?)(?!public\.)(?P<tabla>{tabla_esc})\b",
-            rf"\1public.\g<tabla>",
+            rf"\b(TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?)(?!\"?[A-Za-z_][A-Za-z0-9_]*\"?\.)(?P<tabla>{tabla_esc})\b",
+            lambda m: f"{m.group(1)}{esquema}.{m.group('tabla')}",
             q,
             flags=re.IGNORECASE
         )
         q = re.sub(
-            rf"\b(INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?\S+\s+ON\s+)(?!public\.)(?P<tabla>{tabla_esc})\b",
-            rf"\1public.\g<tabla>",
+            rf"\b(INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?\S+\s+ON\s+)(?!\"?[A-Za-z_][A-Za-z0-9_]*\"?\.)(?P<tabla>{tabla_esc})\b",
+            lambda m: f"{m.group(1)}{esquema}.{m.group('tabla')}",
             q,
             flags=re.IGNORECASE
         )
@@ -169,7 +245,7 @@ def adaptar_sql_postgres(query):
     return calificar_tablas_postgres(q)
 
 def ejecutar_upsert_postgres(cursor, tabla, columnas, valores, conflicto):
-    tabla_pg = f"public.{tabla}" if "." not in tabla else tabla
+    tabla_pg = tabla_postgres(tabla) if "." not in tabla else tabla
     cols = ", ".join(columnas)
     marcas = ", ".join(["%s"] * len(columnas))
     updates = ", ".join([f"{col}=EXCLUDED.{col}" for col in columnas if col not in conflicto])
@@ -183,8 +259,9 @@ def ejecutar_upsert_postgres(cursor, tabla, columnas, valores, conflicto):
 def asegurar_estructura_db_postgres():
     conn = conectar_db()
     cursor = conn.cursor()
-    cursor.execute("CREATE SCHEMA IF NOT EXISTS public")
-    cursor.execute("SET search_path TO public, pg_catalog")
+    esquema = esquema_postgres()
+    cursor.execute(f"CREATE SCHEMA IF NOT EXISTS {escapar_identificador_postgres(esquema)}")
+    cursor.execute(f"SET search_path TO {escapar_identificador_postgres(esquema)}, pg_catalog")
     tablas_sql = [
         """CREATE TABLE IF NOT EXISTS usuarios (id SERIAL PRIMARY KEY, username TEXT UNIQUE, password TEXT, rol TEXT, login_token TEXT)""",
         """CREATE TABLE IF NOT EXISTS inventario (id SERIAL PRIMARY KEY, nombre TEXT UNIQUE, proveedor TEXT, fecha_ingreso TEXT, costo REAL, precio REAL, stock INTEGER)""",
@@ -543,11 +620,11 @@ def asegurar_estructura_db():
     conn.close()
 
 @st.cache_resource(show_spinner=False)
-def inicializar_estructura_db_cache(backend, database_url, db_name):
+def inicializar_estructura_db_cache(backend, database_url, db_name, version):
     asegurar_estructura_db()
     return True
 
-inicializar_estructura_db_cache(DB_BACKEND, DATABASE_URL, DB_NAME)
+inicializar_estructura_db_cache(DB_BACKEND, DATABASE_URL, DB_NAME, 3)
 
 def preparar_query_runtime(query, params=()):
     if DB_BACKEND != "postgres":
@@ -582,7 +659,7 @@ def ejecutar_query(query, params=(), fetch=False, commit=False):
     try:
         cursor = conn.cursor()
         if DB_BACKEND == "postgres":
-            cursor.execute("SET search_path TO public, pg_catalog")
+            cursor.execute(f"SET search_path TO {escapar_identificador_postgres(esquema_postgres())}, pg_catalog")
         query_preparada, params_preparados = preparar_query_runtime(query, params)
         if DB_BACKEND == "postgres":
             query_preparada = calificar_tablas_postgres(query_preparada)
@@ -597,9 +674,14 @@ def ejecutar_query(query, params=(), fetch=False, commit=False):
         conn.rollback()
         if DB_BACKEND == "postgres" and getattr(exc, "pgcode", "") == "3F000":
             try:
+                try:
+                    obtener_esquema_postgres_cache.clear()
+                except Exception:
+                    pass
                 cursor = conn.cursor()
-                cursor.execute("CREATE SCHEMA IF NOT EXISTS public")
-                cursor.execute("SET search_path TO public, pg_catalog")
+                esquema = esquema_postgres()
+                cursor.execute(f"CREATE SCHEMA IF NOT EXISTS {escapar_identificador_postgres(esquema)}")
+                cursor.execute(f"SET search_path TO {escapar_identificador_postgres(esquema)}, pg_catalog")
                 query_preparada, params_preparados = preparar_query_runtime(query, params)
                 query_preparada = calificar_tablas_postgres(query_preparada)
                 cursor.execute(query_preparada, params_preparados)
@@ -620,7 +702,7 @@ def insertar_venta(cliente, total, estado, fecha, atendido_por_tipo="", atendido
     valores = (cliente, total, estado, fecha, "ABIERTO", atendido_por_tipo, atendido_por_nombre, metodo_pago, receptor_tipo, receptor_nombre, origen)
     if DB_BACKEND == "postgres":
         fila = ejecutar_query(
-            f"INSERT INTO public.ventas ({columnas}) VALUES (?,?,?,?,?,?,?,?,?,?,?) RETURNING id",
+            f"INSERT INTO {tabla_postgres('ventas')} ({columnas}) VALUES (?,?,?,?,?,?,?,?,?,?,?) RETURNING id",
             valores,
             fetch=True,
             commit=True
