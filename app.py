@@ -85,6 +85,12 @@ def normalizar_database_url(valor):
 DATABASE_URL = obtener_database_url()
 DB_BACKEND = "postgres" if DATABASE_URL else "sqlite"
 
+@st.cache_resource(show_spinner=False)
+def obtener_pool_postgres(database_url):
+    if psycopg2_pool is None:
+        return None
+    return psycopg2_pool.SimpleConnectionPool(1, 8, database_url, connect_timeout=12)
+
 def ahora_windows():
     return datetime.now(ZONA_HORARIA_SISTEMA)
 
@@ -105,10 +111,20 @@ def conectar_db():
     if DB_BACKEND == "postgres":
         if psycopg2 is None:
             raise RuntimeError("Falta instalar psycopg2-binary para usar PostgreSQL en Streamlit Cloud.")
+        pool_db = obtener_pool_postgres(DATABASE_URL)
+        if pool_db is not None:
+            return pool_db.getconn()
         return psycopg2.connect(DATABASE_URL, connect_timeout=12)
     return sqlite3.connect(DB_NAME)
 
 def liberar_db(conn):
+    if DB_BACKEND == "postgres" and psycopg2_pool is not None:
+        try:
+            conn.rollback()
+            obtener_pool_postgres(DATABASE_URL).putconn(conn)
+            return
+        except Exception:
+            pass
     conn.close()
 
 def ejecutar_sql_directo(cursor, query, params=()):
@@ -122,13 +138,19 @@ def calificar_tablas_postgres(query):
     for tabla in sorted(TABLAS_POSTGRES_PUBLIC, key=len, reverse=True):
         tabla_esc = re.escape(tabla)
         q = re.sub(
-            rf"\b(FROM|JOIN|INTO|UPDATE|ON)\s+(?!public\.)(?P<tabla>{tabla_esc})\b",
+            rf"\b(FROM|JOIN|INTO|UPDATE)\s+(?!public\.)(?P<tabla>{tabla_esc})\b",
             rf"\1 public.\g<tabla>",
             q,
             flags=re.IGNORECASE
         )
         q = re.sub(
             rf"\b(TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?)(?!public\.)(?P<tabla>{tabla_esc})\b",
+            rf"\1public.\g<tabla>",
+            q,
+            flags=re.IGNORECASE
+        )
+        q = re.sub(
+            rf"\b(INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?\S+\s+ON\s+)(?!public\.)(?P<tabla>{tabla_esc})\b",
             rf"\1public.\g<tabla>",
             q,
             flags=re.IGNORECASE
@@ -571,11 +593,45 @@ def ejecutar_query(query, params=(), fetch=False, commit=False):
         if commit:
             conn.commit()
         return res
-    except Exception:
+    except Exception as exc:
         conn.rollback()
+        if DB_BACKEND == "postgres" and getattr(exc, "pgcode", "") == "3F000":
+            try:
+                cursor = conn.cursor()
+                cursor.execute("CREATE SCHEMA IF NOT EXISTS public")
+                cursor.execute("SET search_path TO public, pg_catalog")
+                query_preparada, params_preparados = preparar_query_runtime(query, params)
+                query_preparada = calificar_tablas_postgres(query_preparada)
+                cursor.execute(query_preparada, params_preparados)
+                res = None
+                if fetch:
+                    res = cursor.fetchall()
+                if commit:
+                    conn.commit()
+                return res
+            except Exception:
+                conn.rollback()
         raise
     finally:
         liberar_db(conn)
+
+def insertar_venta(cliente, total, estado, fecha, atendido_por_tipo="", atendido_por_nombre="", metodo_pago="Efectivo", receptor_tipo="Caja Chica", receptor_nombre="", origen="Ventas"):
+    columnas = "cliente, total, estado, fecha, estado_caja, atendido_por_tipo, atendido_por_nombre, metodo_pago, receptor_tipo, receptor_nombre, origen"
+    valores = (cliente, total, estado, fecha, "ABIERTO", atendido_por_tipo, atendido_por_nombre, metodo_pago, receptor_tipo, receptor_nombre, origen)
+    if DB_BACKEND == "postgres":
+        fila = ejecutar_query(
+            f"INSERT INTO public.ventas ({columnas}) VALUES (?,?,?,?,?,?,?,?,?,?,?) RETURNING id",
+            valores,
+            fetch=True,
+            commit=True
+        )
+        return fila[0][0]
+    ejecutar_query(
+        f"INSERT INTO ventas ({columnas}) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        valores,
+        commit=True
+    )
+    return ejecutar_query("SELECT max(id) FROM ventas", fetch=True)[0][0]
 
 def registrar_movimiento_stock(inventario_id, producto, tipo, cantidad, stock_anterior, stock_nuevo, motivo=""):
     usuario = st.session_state.get("usuario", "Sistema")
@@ -974,11 +1030,7 @@ def registrar_credito_cliente(cliente, origen, producto, cantidad, precio_unitar
         id_venta, total_actual = existente[0]
         ejecutar_query("UPDATE ventas SET total=?, origen='Cuenta Corriente' WHERE id=?", ((total_actual or 0) + subtotal, id_venta), commit=True)
     else:
-        ejecutar_query(
-            "INSERT INTO ventas (cliente, total, estado, fecha, estado_caja, origen) VALUES (?,?,?,?, 'ABIERTO', ?)",
-            (cliente_normalizado, subtotal, "CREDITO", fecha, "Cuenta Corriente"),
-            commit=True
-        )
+        insertar_venta(cliente_normalizado, subtotal, "CREDITO", fecha, origen="Cuenta Corriente")
     ejecutar_query(
         "INSERT INTO detalle_creditos (cliente, producto, cantidad, precio_unitario, subtotal, fecha, origen, referencia_id, mesero_nombre, trabajador_nombre) VALUES (?,?,?,?,?,?,?,?,?,?)",
         (cliente_normalizado, producto, cantidad, precio_unitario, subtotal, fecha, origen, referencia_id, mesero_nombre, trabajador_nombre),
@@ -1019,11 +1071,7 @@ def recalcular_credito_cliente(cliente):
         for (id_dup,) in cabeceras[1:]:
             ejecutar_query("DELETE FROM ventas WHERE id=?", (id_dup,), commit=True)
     elif total > 0:
-        ejecutar_query(
-            "INSERT INTO ventas (cliente, total, estado, fecha, estado_caja, origen) VALUES (?,?,?,?, 'ABIERTO', 'Cuenta Corriente')",
-            (cliente_normalizado, total, "CREDITO", fecha_hora_actual()),
-            commit=True
-        )
+        insertar_venta(cliente_normalizado, total, "CREDITO", fecha_hora_actual(), origen="Cuenta Corriente")
     return total
 
 def liquidar_creditos_cliente(cliente, metodo_pago, receptor_tipo, receptor_nombre, atendido_nombre="", detalle_ids=None, pagos_detalle=None):
@@ -1054,12 +1102,18 @@ def liquidar_creditos_cliente(cliente, metodo_pago, receptor_tipo, receptor_nomb
     tiene_cancha_sin_ref = any(d[5] == "Cancha" and not d[6] for d in detalles)
 
     if total_ventas > 0:
-        ejecutar_query(
-            "INSERT INTO ventas (cliente, total, estado, fecha, estado_caja, atendido_por_tipo, atendido_por_nombre, metodo_pago, receptor_tipo, receptor_nombre, origen) VALUES (?,?,?,?, 'ABIERTO', ?,?,?,?,?, 'Ventas')",
-            (cliente_normalizado, total_ventas, "PAGADO", fecha_pago, "Trabajador" if atendido_nombre else "", atendido_nombre, metodo_pago, receptor_tipo, receptor_nombre),
-            commit=True
+        venta_pago_id = insertar_venta(
+            cliente_normalizado,
+            total_ventas,
+            "PAGADO",
+            fecha_pago,
+            "Trabajador" if atendido_nombre else "",
+            atendido_nombre,
+            metodo_pago,
+            receptor_tipo,
+            receptor_nombre,
+            "Ventas"
         )
-        venta_pago_id = ejecutar_query("SELECT max(id) FROM ventas", fetch=True)[0][0]
         for _, producto, cantidad, precio_unitario, subtotal, _, _ in detalles_ventas:
             ejecutar_query(
                 "INSERT INTO detalle_ventas (venta_id, producto, cantidad, precio_unitario, subtotal) VALUES (?,?,?,?,?)",
@@ -3021,6 +3075,55 @@ else:
                     
                     total_carrito = df_carrito["subtotal"].sum()
                     st.markdown(f"### **Total a Pagar: S/. {total_carrito:.2f}**")
+
+                    if "carrito_edit_nonce" not in st.session_state:
+                        st.session_state["carrito_edit_nonce"] = 0
+                    st.markdown("#### Ajustar lista antes de cobrar")
+                    opciones_carrito = {
+                        f"{idx + 1}. {item['producto']} - Cant. {int(item['cantidad'])} - S/. {float(item['subtotal']):.2f}": idx
+                        for idx, item in enumerate(st.session_state["carrito"])
+                    }
+                    item_carrito_label = st.selectbox(
+                        "Producto en lista",
+                        list(opciones_carrito.keys()),
+                        key=f"sb_item_carrito_edit_{st.session_state['carrito_edit_nonce']}"
+                    )
+                    idx_carrito = opciones_carrito[item_carrito_label]
+                    item_carrito = st.session_state["carrito"][idx_carrito]
+                    col_edit_carrito_1, col_edit_carrito_2, col_edit_carrito_3 = st.columns([1.1, 1, 1])
+                    with col_edit_carrito_1:
+                        nueva_cantidad_carrito = st.number_input(
+                            "Cantidad final",
+                            min_value=1,
+                            value=int(item_carrito["cantidad"]),
+                            step=1,
+                            key=f"num_cant_carrito_{idx_carrito}_{st.session_state['carrito_edit_nonce']}"
+                        )
+                    with col_edit_carrito_2:
+                        st.write("")
+                        if st.button("Actualizar cantidad", use_container_width=True, key=f"btn_update_carrito_{st.session_state['carrito_edit_nonce']}"):
+                            producto_carrito = item_carrito["producto"]
+                            stock_fila = ejecutar_query("SELECT stock FROM inventario WHERE nombre=?", (producto_carrito,), fetch=True)
+                            stock_disponible_carrito = int(stock_fila[0][0]) if stock_fila else 0
+                            cantidad_otros_items = sum(
+                                int(item["cantidad"])
+                                for pos, item in enumerate(st.session_state["carrito"])
+                                if pos != idx_carrito and item["producto"] == producto_carrito
+                            )
+                            if cantidad_otros_items + int(nueva_cantidad_carrito) > stock_disponible_carrito:
+                                st.error(f"No hay stock suficiente. Disponible: {stock_disponible_carrito}")
+                            else:
+                                st.session_state["carrito"][idx_carrito]["cantidad"] = int(nueva_cantidad_carrito)
+                                st.session_state["carrito"][idx_carrito]["amount"] = int(nueva_cantidad_carrito)
+                                st.session_state["carrito"][idx_carrito]["subtotal"] = float(item_carrito["precio_unitario"]) * int(nueva_cantidad_carrito)
+                                st.session_state["carrito_edit_nonce"] += 1
+                                st.rerun()
+                    with col_edit_carrito_3:
+                        st.write("")
+                        if st.button("Quitar producto", use_container_width=True, key=f"btn_remove_carrito_{st.session_state['carrito_edit_nonce']}"):
+                            st.session_state["carrito"].pop(idx_carrito)
+                            st.session_state["carrito_edit_nonce"] += 1
+                            st.rerun()
                     
                     col_c1, col_c2 = st.columns(2)
                     with col_c1:
@@ -3037,15 +3140,6 @@ else:
                             else:
                                 fecha_actual = fecha_hora_actual()
                                 
-                                # A. Restar del inventario y mandar a cocina si aplica
-                                for item in st.session_state['carrito']:
-                                    st_act = ejecutar_query("SELECT stock FROM inventario WHERE nombre=?", (item['producto'],), fetch=True)[0][0]
-                                    ejecutar_query("UPDATE inventario SET stock=? WHERE nombre=?", (st_act - item['cantidad'], item['producto']), commit=True)
-                                    
-                                    if str(item['proveedor']).strip().upper() == "INTERNO":
-                                        ejecutar_query("INSERT INTO cocina (cliente, plato, cantidad, fecha_hora, estado, mesero_nombre) VALUES (?,?,?,?,?,?)",
-                                                       (cliente_final, item['producto'], item['cantidad'], fecha_actual, "PENDIENTE", atendido_nombre), commit=True)
-                                
                                 # B. Si es cuenta de crédito
                                 if tipo_pago == "LLEVAR A CUENTA CRÉDITO (Anotar en lista histórica)":
                                     existe_cabecera = ejecutar_query("SELECT id, total FROM ventas WHERE cliente=? AND estado='CREDITO'", (cliente_final,), fetch=True)
@@ -3059,10 +3153,17 @@ else:
                                             commit=True
                                         )
                                     else:
-                                        ejecutar_query(
-                                            "INSERT INTO ventas (cliente, total, estado, fecha, estado_caja, atendido_por_tipo, atendido_por_nombre, metodo_pago, receptor_tipo, receptor_nombre, origen) VALUES (?,?,?,?, 'ABIERTO', ?,?,?,?,?, 'Cuenta Corriente')",
-                                            (cliente_final, total_carrito, "CREDITO", fecha_actual, atendido_tipo, atendido_nombre, metodo_pago_venta, receptor_tipo_venta, receptor_nombre_venta),
-                                            commit=True
+                                        insertar_venta(
+                                            cliente_final,
+                                            total_carrito,
+                                            "CREDITO",
+                                            fecha_actual,
+                                            atendido_tipo,
+                                            atendido_nombre,
+                                            metodo_pago_venta,
+                                            receptor_tipo_venta,
+                                            receptor_nombre_venta,
+                                            "Cuenta Corriente"
                                         )
                                     
                                     for item in st.session_state['carrito']:
@@ -3070,6 +3171,11 @@ else:
                                         trabajador_credito = atendido_nombre if atendido_tipo != "Mesero" else ""
                                         ejecutar_query("INSERT INTO detalle_creditos (cliente, producto, cantidad, precio_unitario, subtotal, fecha, origen, mesero_nombre, trabajador_nombre) VALUES (?,?,?,?,?,?, 'Ventas', ?, ?)",
                                                        (cliente_final, item['producto'], item['cantidad'], item['precio_unitario'], item['subtotal'], fecha_actual, mesero_credito, trabajador_credito), commit=True)
+                                        st_act = ejecutar_query("SELECT stock FROM inventario WHERE nombre=?", (item['producto'],), fetch=True)[0][0]
+                                        ejecutar_query("UPDATE inventario SET stock=? WHERE nombre=?", (st_act - item['cantidad'], item['producto']), commit=True)
+                                        if str(item['proveedor']).strip().upper() == "INTERNO":
+                                            ejecutar_query("INSERT INTO cocina (cliente, plato, cantidad, fecha_hora, estado, mesero_nombre) VALUES (?,?,?,?,?,?)",
+                                                           (cliente_final, item['producto'], item['cantidad'], fecha_actual, "PENDIENTE", atendido_nombre), commit=True)
                                     
                                     st.success(f"¡Cargado con éxito al crédito de {cliente_final}!")
                                     st.session_state['carrito'] = []
@@ -3078,17 +3184,26 @@ else:
                                 
                                 # C. Si es pago al instante (CONTROLADO LOCALMENTE)
                                 else:
-                                    ejecutar_query(
-                                        "INSERT INTO ventas (cliente, total, estado, fecha, estado_caja, atendido_por_tipo, atendido_por_nombre, metodo_pago, receptor_tipo, receptor_nombre, origen) VALUES (?,?,?,?, 'ABIERTO', ?,?,?,?,?, 'Ventas')",
-                                        (cliente_final, total_carrito, "PAGADO", fecha_actual, atendido_tipo, atendido_nombre, metodo_pago_venta, receptor_tipo_venta, receptor_nombre_venta),
-                                        commit=True
+                                    venta_id = insertar_venta(
+                                        cliente_final,
+                                        total_carrito,
+                                        "PAGADO",
+                                        fecha_actual,
+                                        atendido_tipo,
+                                        atendido_nombre,
+                                        metodo_pago_venta,
+                                        receptor_tipo_venta,
+                                        receptor_nombre_venta,
+                                        "Ventas"
                                     )
-                                    
-                                    ultimo_id_req = ejecutar_query("SELECT max(id) FROM ventas", fetch=True)
-                                    venta_id = ultimo_id_req[0][0] if ultimo_id_req else 1
                                     pagos_detalle_venta, _ = obtener_detalle_pago(f"venta_{venta_form_nonce}", total_carrito, metodo_pago_venta)
                                     
                                     for item in st.session_state['carrito']:
+                                        st_act = ejecutar_query("SELECT stock FROM inventario WHERE nombre=?", (item['producto'],), fetch=True)[0][0]
+                                        ejecutar_query("UPDATE inventario SET stock=? WHERE nombre=?", (st_act - item['cantidad'], item['producto']), commit=True)
+                                        if str(item['proveedor']).strip().upper() == "INTERNO":
+                                            ejecutar_query("INSERT INTO cocina (cliente, plato, cantidad, fecha_hora, estado, mesero_nombre) VALUES (?,?,?,?,?,?)",
+                                                           (cliente_final, item['producto'], item['cantidad'], fecha_actual, "PENDIENTE", atendido_nombre), commit=True)
                                         ejecutar_query("INSERT INTO detalle_ventas (venta_id, producto, cantidad, precio_unitario, subtotal) VALUES (?,?,?,?,?)",
                                                        (venta_id, item['producto'], item['cantidad'], item['precio_unitario'], item['subtotal']), commit=True)
                                     registrar_pagos_caja("Ventas", venta_id, cliente_final, total_carrito, metodo_pago_venta, pagos_detalle_venta, observacion="Venta en mostrador")
@@ -3771,10 +3886,17 @@ else:
                             pagos_detalle_cancha_liq, _ = obtener_detalle_pago(f"cancha_liq_{id_cancha_liquidar}", restante, metodo_cancha_liq)
                             if estado_caja_reserva == "CERRADO":
                                 ejecutar_query("UPDATE cancha SET estado='PAGADO', metodo_pago=?, receptor_tipo=?, receptor_nombre=? WHERE id=?", (metodo_cancha_liq, receptor_cancha_liq, receptor_nombre_cancha_liq, id_cancha_liquidar), commit=True)
-                                ejecutar_query(
-                                    "INSERT INTO ventas (cliente, total, estado, fecha, estado_caja, atendido_por_tipo, atendido_por_nombre, metodo_pago, receptor_tipo, receptor_nombre, origen) VALUES (?,?,?,?, 'ABIERTO', ?,?,?,?,?, 'Cancha')",
-                                    (cliente_c, restante, "PAGADO", fecha_hora_actual(), "Trabajador", trabajador_cancha, metodo_cancha_liq, receptor_cancha_liq, receptor_nombre_cancha_liq),
-                                    commit=True
+                                insertar_venta(
+                                    cliente_c,
+                                    restante,
+                                    "PAGADO",
+                                    fecha_hora_actual(),
+                                    "Trabajador",
+                                    trabajador_cancha,
+                                    metodo_cancha_liq,
+                                    receptor_cancha_liq,
+                                    receptor_nombre_cancha_liq,
+                                    "Cancha"
                                 )
                             else:
                                 ejecutar_query("UPDATE cancha SET estado='PAGADO', estado_caja='ABIERTO', metodo_pago=?, receptor_tipo=?, receptor_nombre=? WHERE id=?", (metodo_cancha_liq, receptor_cancha_liq, receptor_nombre_cancha_liq, id_cancha_liquidar), commit=True)
